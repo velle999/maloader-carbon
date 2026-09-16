@@ -900,6 +900,12 @@ void aglSwapBuffers(void* ctx) {
   SDL_GL_SwapWindow(c->window);
   double after = clock_seconds(CLOCK_MONOTONIC);
   swapping += after - before;
+  static double last_swapped;
+  if (last_swapped > 0) {
+    hle_profile_frame(swaps, (after - last_swapped) * 1000,
+                      (after - before) * 1000);
+  }
+  last_swapped = after;
   Uint32 now = SDL_GetTicks();
   if (last_swap) {
     Uint32 frame = now - last_swap;

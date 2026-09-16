@@ -20,4 +20,8 @@ void hle_profile_thread(void);
 // exit. Writes nothing twice.
 void hle_profile_write(void);
 
+// Ends a frame of the game's thread for HLE_LONG_FRAMES: |wall_ms| since the
+// last swap, |swap_ms| of them in this one.
+void hle_profile_frame(unsigned frame, double wall_ms, double swap_ms);
+
 #endif  // HLE_PROFILE_H_

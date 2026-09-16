@@ -114,6 +114,12 @@ executables at 0x400000, which is inside the game's image.
   the counts to that file at the exit, or at a crash.
   `tools/profile_report.py <file> <disassembly>` sums them up by thread,
   library and function.
+- `HLE_LONG_FRAMES=<ms>` reports each frame that takes at least that long:
+  how much of it the game's thread spent on the CPU and in the swap, where
+  that CPU time went, grouped by the game's code it was called from, and
+  what system calls the thread was blocked in, and from where. The blocked
+  time is read every millisecond from `/proc/self/task/<id>/syscall` by a
+  thread of its own, so the game's thread is not interrupted for it.
 - `HLE_VAR=0` leaves out the emulated vertex array extensions (see Windows,
   graphics, input and sound).
 - `HLE_RECOVER=0` lets the game's own fault (see Status) stop it with a crash

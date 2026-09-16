@@ -14,6 +14,16 @@
 // The kernel signals the thread that was running when the millisecond ran
 // out, unless that thread blocks SIGPROF, as SDL's threads do; the sound
 // callback calls hle_profile_thread so that its thread is sampled too.
+//
+// HLE_LONG_FRAMES=<ms> samples the same way, with or without HLE_PROFILE,
+// and reports each frame that takes at least that long: how much of it the
+// game's thread spent working and how much in the swap, and where the
+// samples taken on that thread during the frame were, grouped by the game's
+// code they were called from. Time the thread spends blocked uses no CPU
+// and is not sampled that way, so a watching thread also reads, every
+// millisecond, the system call the game's thread is blocked in, from
+// /proc/self/task/<id>/syscall, which leaves the thread undisturbed, and
+// finds the game's code that made the call from the stack pointer there.
 
 #define _GNU_SOURCE
 
@@ -21,6 +31,7 @@
 
 #include <dlfcn.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
@@ -42,6 +53,9 @@ enum {
   kProbes = 32,
   kStackChunk = 256,  // stack words read at a time, looking for a caller
   kStackChunks = 8,
+  kFrameSamples = 2048,  // the main thread's, in one frame
+  kFramePlaces = 64,     // distinct callers counted in a long frame
+  kPlacesShown = 6,
 };
 
 typedef struct {
@@ -60,6 +74,23 @@ static uintptr_t game_lo;
 static uintptr_t game_hi;
 static pid_t pid;
 static char* output;
+
+typedef struct {
+  uint32_t address;  // or, for the watching thread's, the system call
+  uint32_t caller;
+  uint32_t micros;   // the time it stands for
+} frame_sample;
+
+static frame_sample frame_samples[kFrameSamples];
+static volatile sig_atomic_t frame_sample_count;
+static volatile sig_atomic_t frame_reading;  // no appending while set
+static double long_frame_ms;                 // 0: not reported
+
+// The watching thread's samples of the game's thread blocked, guarded by
+// blocked_busy.
+static frame_sample blocked_samples[kFrameSamples];
+static uint32_t blocked_sample_count;
+static int blocked_busy;
 
 static int in_game(uintptr_t address) {
   return address >= game_lo && address < game_hi;
@@ -157,9 +188,19 @@ static void on_sample(int signum, siginfo_t* info, void* context) {
   int saved_errno = errno;
   greg_t* r = ((ucontext_t*)context)->uc_mcontext.gregs;
   uintptr_t address = (uintptr_t)r[REG_EIP];
-  record(address,
-         find_caller(address, (uintptr_t)r[REG_ESP], (uintptr_t)r[REG_EBP]),
-         (uint32_t)syscall(SYS_gettid));
+  uint32_t caller =
+      find_caller(address, (uintptr_t)r[REG_ESP], (uintptr_t)r[REG_EBP]);
+  uint32_t thread = (uint32_t)syscall(SYS_gettid);
+  if (slots) {
+    record(address, caller, thread);
+  }
+  if (long_frame_ms > 0 && thread == (uint32_t)pid && !frame_reading &&
+      frame_sample_count < kFrameSamples) {
+    frame_samples[frame_sample_count].address = address;
+    frame_samples[frame_sample_count].caller = caller;
+    frame_samples[frame_sample_count].micros = 1000;
+    frame_sample_count++;
+  }
   errno = saved_errno;
 }
 
@@ -167,7 +208,7 @@ static int written;
 static void write_profile(void);
 
 void hle_profile_write(void) {
-  if (slots) {
+  if (slots && output) {
     write_profile();
   }
 }
@@ -224,10 +265,70 @@ static void write_profile(void) {
   fprintf(stderr, "hle: a profile of %u samples is in %s\n", samples, output);
 }
 
+static double monotonic_seconds(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+// Samples what the game's thread is blocked in, every millisecond.
+static void* watch_game_thread(void* unused) {
+  sigset_t set;
+  sigemptyset(&set);
+  sigaddset(&set, SIGPROF);
+  pthread_sigmask(SIG_BLOCK, &set, NULL);
+  char path[64];
+  snprintf(path, sizeof(path), "/proc/self/task/%d/syscall", (int)pid);
+  int fd = open(path, O_RDONLY | O_CLOEXEC);
+  if (fd < 0) {
+    fprintf(stderr, "hle: HLE_LONG_FRAMES: cannot read %s: %m\n", path);
+    return NULL;
+  }
+  double last = monotonic_seconds();
+  for (;;) {
+    struct timespec pause = { 0, 1000000 };
+    nanosleep(&pause, NULL);
+    char text[256];
+    ssize_t n = pread(fd, text, sizeof(text) - 1, 0);
+    double now = monotonic_seconds();
+    uint32_t micros = (uint32_t)((now - last) * 1e6);
+    last = now;
+    if (n <= 0 || text[0] == 'r') {
+      continue;  // "running"
+    }
+    text[n] = '\0';
+    long call;
+    unsigned long args[6];
+    unsigned long sp;
+    unsigned long pc;
+    if (sscanf(text, "%ld %lx %lx %lx %lx %lx %lx %lx %lx", &call, &args[0],
+               &args[1], &args[2], &args[3], &args[4], &args[5], &sp, &pc) !=
+        9) {
+      if (sscanf(text, "%ld %lx %lx", &call, &sp, &pc) != 3) {
+        continue;
+      }
+    }
+    uint32_t caller = find_caller(pc, sp, 0);
+    while (__sync_lock_test_and_set(&blocked_busy, 1)) {
+      sched_yield();
+    }
+    if (blocked_sample_count < kFrameSamples) {
+      frame_sample* s = &blocked_samples[blocked_sample_count++];
+      s->address = (uint32_t)call;
+      s->caller = caller;
+      s->micros = micros;
+    }
+    __sync_lock_release(&blocked_busy);
+  }
+  return NULL;
+}
+
 void hle_profile_start(void* game_code) {
   static int started;
   const char* path = getenv("HLE_PROFILE");
-  if (started || !path || !*path) {
+  const char* long_frames = getenv("HLE_LONG_FRAMES");
+  int profile = path && *path;
+  if (started || (!profile && !(long_frames && atof(long_frames) > 0))) {
     return;
   }
   started = 1;
@@ -244,27 +345,211 @@ void hle_profile_start(void* game_code) {
     }
     fclose(maps);
   }
-  sample_slot* table = mmap(NULL, kSlots * sizeof(*table),
-                            PROT_READ | PROT_WRITE,
-                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  sample_slot* table = profile ? mmap(NULL, kSlots * sizeof(*table),
+                                     PROT_READ | PROT_WRITE,
+                                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
+                              : NULL;
   if (!game_hi || table == MAP_FAILED) {
     fprintf(stderr, "hle: HLE_PROFILE: the game's code was not found\n");
     return;
   }
   pid = getpid();
-  output = strdup(path);
+  long_frame_ms = long_frames ? atof(long_frames) : 0;
   struct sigaction action;
   memset(&action, 0, sizeof(action));
   action.sa_sigaction = on_sample;
   action.sa_flags = SA_SIGINFO | SA_RESTART;
   sigemptyset(&action.sa_mask);
   sigaction(SIGPROF, &action, NULL);
-  slots = table;
-  atexit(write_profile);
+  if (profile) {
+    output = strdup(path);
+    slots = table;
+    atexit(write_profile);
+  }
   struct itimerval every = { { 0, 1000 }, { 0, 1000 } };
   setitimer(ITIMER_PROF, &every, NULL);
-  fprintf(stderr, "hle: profiling the game's code at %#lx-%#lx into %s\n",
-          (unsigned long)game_lo, (unsigned long)game_hi, output);
+  if (profile) {
+    fprintf(stderr, "hle: profiling the game's code at %#lx-%#lx into %s\n",
+            (unsigned long)game_lo, (unsigned long)game_hi, output);
+  }
+  if (long_frame_ms > 0) {
+    pthread_t watcher;
+    pthread_attr_t attributes;
+    pthread_attr_init(&attributes);
+    pthread_attr_setdetachstate(&attributes, PTHREAD_CREATE_DETACHED);
+    if (pthread_create(&watcher, &attributes, watch_game_thread, NULL) != 0) {
+      fprintf(stderr, "hle: HLE_LONG_FRAMES: no thread to watch with\n");
+    }
+    pthread_attr_destroy(&attributes);
+    fprintf(stderr, "hle: reporting frames of %g ms or more\n",
+            long_frame_ms);
+  }
+}
+
+// Names |address| into |out|: the game's code, or a library and symbol.
+static void name_address(uint32_t address, char* out, size_t size) {
+  Dl_info info;
+  if (in_game(address)) {
+    snprintf(out, size, "game %#x", address);
+  } else if (dladdr((void*)(uintptr_t)address, &info) && info.dli_fname) {
+    const char* file = strrchr(info.dli_fname, '/');
+    file = file ? file + 1 : info.dli_fname;
+    if (info.dli_sname) {
+      snprintf(out, size, "%s %s+%#lx", file, info.dli_sname,
+               (unsigned long)(address - (uintptr_t)info.dli_saddr));
+    } else {
+      snprintf(out, size, "%s %#x", *file ? file : "?", address);
+    }
+  } else {
+    snprintf(out, size, "%#x (no library)", address);
+  }
+}
+
+typedef struct {
+  uint32_t caller;
+  uint32_t address;  // the first sample's, to name where the time went
+  uint32_t count;
+} frame_place;
+
+static const char* system_call_name(uint32_t call) {
+  switch ((int32_t)call) {
+    case -1: return "no system call (a page fault?)";
+    case 3: return "read";
+    case 4: return "write";
+    case 5: return "open";
+    case 54: return "ioctl";
+    case 91: return "munmap";
+    case 142: return "select";
+    case 158: return "sched_yield";
+    case 162: return "nanosleep";
+    case 168: return "poll";
+    case 180: return "pread64";
+    case 192: return "mmap2";
+    case 240: return "futex";
+    case 265: return "clock_gettime";
+    case 267: return "clock_nanosleep";
+    case 407: return "clock_nanosleep_time64";
+    case 414: return "ppoll_time64";
+    case 422: return "futex_time64";
+  }
+  return NULL;
+}
+
+// Appends |samples| grouped by the game's code they were called from, the
+// groups with the most time first, to |line|.
+static size_t append_places(char* line, size_t size, size_t n,
+                            const frame_sample* samples, uint32_t count,
+                            int calls) {
+  frame_place places[kFramePlaces];
+  uint32_t place_count = 0;
+  uint32_t unplaced = 0;
+  for (uint32_t i = 0; i < count; i++) {
+    const frame_sample* s = &samples[i];
+    uint32_t p = 0;
+    while (p < place_count &&
+           (places[p].caller != s->caller ||
+            (calls && places[p].address != s->address))) {
+      p++;
+    }
+    if (p == place_count) {
+      if (place_count == kFramePlaces) {
+        unplaced += s->micros;
+        continue;
+      }
+      places[p].caller = s->caller;
+      places[p].address = s->address;
+      places[p].count = 0;
+      place_count++;
+    }
+    places[p].count += s->micros;
+  }
+  for (int shown = 0; shown < kPlacesShown && n < size; shown++) {
+    uint32_t best = place_count;
+    for (uint32_t p = 0; p < place_count; p++) {
+      if (places[p].count &&
+          (best == place_count || places[p].count > places[best].count)) {
+        best = p;
+      }
+    }
+    if (best == place_count) {
+      break;
+    }
+    char where[256];
+    if (calls) {
+      const char* name = system_call_name(places[best].address);
+      if (name) {
+        snprintf(where, sizeof(where), "%s", name);
+      } else {
+        snprintf(where, sizeof(where), "system call %d",
+                 (int)places[best].address);
+      }
+    } else {
+      name_address(places[best].address, where, sizeof(where));
+    }
+    if (places[best].caller) {
+      n += (size_t)snprintf(line + n, size - n, "%s %.0f in %s from game %#x",
+                            shown ? ";" : ":", places[best].count / 1000.0,
+                            where, places[best].caller);
+    } else {
+      n += (size_t)snprintf(line + n, size - n, "%s %.0f in %s",
+                            shown ? ";" : ":", places[best].count / 1000.0,
+                            where);
+    }
+    places[best].count = 0;
+  }
+  if (unplaced && n < size) {
+    n += (size_t)snprintf(line + n, size - n, "; %.0f elsewhere",
+                          unplaced / 1000.0);
+  }
+  return n < size ? n : size;
+}
+
+static void report_long_frame(unsigned frame, double wall_ms, double cpu_ms,
+                              double swap_ms, uint32_t count,
+                              const frame_sample* blocked,
+                              uint32_t blocked_count) {
+  char line[2048];
+  size_t n = (size_t)snprintf(
+      line, sizeof(line),
+      "hle: long frame %u: %.0f ms, %.0f of them on this thread's CPU and "
+      "%.1f in the swap; CPU samples in ms", frame, wall_ms, cpu_ms, swap_ms);
+  n = append_places(line, sizeof(line), n, frame_samples, count, 0);
+  double blocked_ms = 0;
+  for (uint32_t i = 0; i < blocked_count; i++) {
+    blocked_ms += blocked[i].micros / 1000.0;
+  }
+  if (n < sizeof(line)) {
+    n += (size_t)snprintf(line + n, sizeof(line) - n, "; blocked %.0f ms",
+                          blocked_ms);
+  }
+  n = append_places(line, sizeof(line), n, blocked, blocked_count, 1);
+  fprintf(stderr, "%s\n", line);
+}
+
+void hle_profile_frame(unsigned frame, double wall_ms, double swap_ms) {
+  static double cpu_at;
+  if (long_frame_ms <= 0) {
+    return;
+  }
+  struct timespec ts;
+  clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+  double cpu = ts.tv_sec + ts.tv_nsec / 1e9;
+  static frame_sample blocked[kFrameSamples];
+  while (__sync_lock_test_and_set(&blocked_busy, 1)) {
+    sched_yield();
+  }
+  uint32_t blocked_count = blocked_sample_count;
+  memcpy(blocked, blocked_samples, blocked_count * sizeof(*blocked));
+  blocked_sample_count = 0;
+  __sync_lock_release(&blocked_busy);
+  frame_reading = 1;
+  if (wall_ms >= long_frame_ms && cpu_at > 0) {
+    report_long_frame(frame, wall_ms, (cpu - cpu_at) * 1000, swap_ms,
+                      (uint32_t)frame_sample_count, blocked, blocked_count);
+  }
+  frame_sample_count = 0;
+  frame_reading = 0;
+  cpu_at = cpu;
 }
 
 void hle_profile_thread(void) {
@@ -282,9 +567,15 @@ void hle_profile_thread(void) {
 #else
 
 void hle_profile_start(void* game_code) {
-  if (getenv("HLE_PROFILE")) {
+  if (getenv("HLE_PROFILE") || getenv("HLE_LONG_FRAMES")) {
     fprintf(stderr, "hle: HLE_PROFILE samples i386 code only\n");
   }
+}
+
+void hle_profile_frame(unsigned frame, double wall_ms, double swap_ms) {
+}
+
+void hle_profile_write(void) {
 }
 
 void hle_profile_thread(void) {
