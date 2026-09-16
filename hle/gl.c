@@ -26,6 +26,7 @@
 #include <SDL2/SDL.h>
 
 #include "arb_program.h"
+#include "gl_combine3.h"
 #include "gl_dispatch.h"
 #include "gl_probe.h"
 #include "gl_stats.h"
@@ -313,9 +314,9 @@ static void* lookup_gl(const char* name) {
   if (!strcmp(name, "glProgramStringARB")) {
     return __darwin_glProgramStringARB;
   }
+  void* real = hle_gl_combine3_wrap(name, dlsym(RTLD_DEFAULT, name));
   return hle_gl_probe_wrap(
-      name, hle_gl_stats_wrap(
-                name, hle_gl_var_wrap(name, dlsym(RTLD_DEFAULT, name))));
+      name, hle_gl_stats_wrap(name, hle_gl_var_wrap(name, real)));
 }
 
 // ---------------------------------------------------------------------------

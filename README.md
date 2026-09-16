@@ -129,7 +129,8 @@ executables at 0x400000, which is inside the game's image.
   the states reported (64 by default), and
   `HLE_PROBE_TEXTURES=<directory>` saves each enabled texture as a PAM file
   and a screenshot of the frame.
-- `HLE_VAR=0` leaves out the emulated vertex array extensions (see Windows,
+- `HLE_VAR=0` leaves out the emulated vertex array extensions, and
+  `HLE_COMBINE3=0` the emulated ATI combine functions (see Windows,
   graphics, input and sound).
 - `HLE_RECOVER=0` lets the game's own fault (see Status) stop it with a crash
   report instead of stepping over it.
@@ -217,6 +218,18 @@ bundles and localized strings, preferences, UUIDs and character sets.
   Pentium 4 the time demo runs 10 to 35% faster with them. `HLE_VAR=0` leaves
   them out. `make tests/var_ranges_test && tests/var_ranges_test` checks the
   ranges they keep.
+- Apple's OpenGL has `GL_ATI_texture_env_combine3` on every renderer, and
+  Halo's Direct3D layer sets its `MODULATE_ADD_ATI` combine function for
+  `D3DTOP_MULTIPLYADD` without looking for the extension, as it does for
+  bullet marks. NVIDIA's driver lacks it and refuses the function, and the
+  texture unit went on with the function it had before: the marks were drawn
+  in their color alone, as squares. Where the driver has
+  `GL_NV_texture_env_combine4`, a unit the game gives an ATI function
+  combines in NVIDIA's four-argument form, `Arg0 * Arg1 + Arg2 * Arg3`, with
+  the game's arguments rearranged to the same result, and goes back to the
+  usual form when the game changes the function. `HLE_COMBINE3=0` leaves it
+  out. `make tests/combine3_test && tests/combine3_test` checks the result
+  against the driver; it needs a display.
 - Displays, their modes and the main GDevice describe SDL's display 0. A mode
   switch resizes the game's window, and a window covering a captured display
   goes full screen unless `HLE_WINDOWED` is 1. Gamma tables are recorded,
