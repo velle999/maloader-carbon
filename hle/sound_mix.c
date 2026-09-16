@@ -140,8 +140,10 @@ uint64_t hle_sound_header_duration_ns(const uint8_t* header,
   return (uint64_t)(frames / rate * 1e9);
 }
 
-static int32_t sample_at(const hle_sound_buffer* buffer, uint32_t frame,
-                         int side) {
+// Inlined: the mixer's thread shares the Pentium 4's core with the game's,
+// and this was called up to four times for every sample of every voice.
+static inline __attribute__((always_inline)) int32_t sample_at(
+    const hle_sound_buffer* buffer, uint32_t frame, int side) {
   const uint8_t* p = buffer->data +
       ((size_t)frame * buffer->channels + (buffer->channels == 2 ? side : 0)) *
           buffer->bytes;
