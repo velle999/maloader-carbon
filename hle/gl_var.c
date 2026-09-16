@@ -32,6 +32,12 @@
 // into the span's buffer object. Fences are always finished, as the GPU
 // never reads the game's memory.
 //
+// Where an array's pointer leads, a buffer object and offset or the pointer
+// itself, is kept with the array and looked up again only when the pointer or
+// a range, span, hint or range enable has changed since: a draw binds a
+// vertex array object, and looking up every array on every bind was 2% of
+// the game's CPU time.
+//
 // A buffer object whose span goes is kept, emptied, for a later span: an
 // array still pointing into a deleted one would become a client pointer to a
 // small address, and a draw with it enabled would fault. The game makes its
@@ -94,6 +100,10 @@ typedef struct {
   uint32_t type;
   int32_t stride;
   const void* pointer;
+  // Where GL is to read it, as of layout generation |translated_as_of|.
+  const void* translated;
+  uint32_t translated_buffer;
+  uint32_t translated_as_of;
 } client_array;
 
 // An array as GL has it: |pointer| is an offset when |buffer| is not 0.
@@ -150,6 +160,15 @@ static uint32_t array_buffer;
 static int array_buffer_known;
 static int enabled = -1;
 static unsigned spans_made;
+// Changes with every range, span, storage hint and range enable, and so with
+// where any array pointer leads; never 0.
+static uint32_t layout_generation = 1;
+
+static void layout_changed(void) {
+  if (++layout_generation == 0) {
+    layout_generation = 1;
+  }
+}
 
 static struct {
   void (*bind_buffer)(uint32_t, uint32_t);
@@ -278,6 +297,16 @@ static const void* translate(const void* pointer, uint32_t* buffer) {
   return (const void*)((uintptr_t)pointer - span->base);
 }
 
+// translate() for |a|'s pointer, remembered until the layout changes.
+static const void* translate_array(client_array* a, uint32_t* buffer) {
+  if (a->translated_as_of != layout_generation) {
+    a->translated = translate(a->pointer, &a->translated_buffer);
+    a->translated_as_of = layout_generation;
+  }
+  *buffer = a->translated_buffer;
+  return a->translated;
+}
+
 static int pointer_function_exists(int slot) {
   switch (slot) {
     case kVertex: return gl.vertex_pointer != NULL;
@@ -292,12 +321,12 @@ static int pointer_function_exists(int slot) {
 }
 
 // Gives GL |want| for |slot|, where GL does not have it already.
-static void apply(int slot, const client_array* want) {
+static void apply(int slot, client_array* want) {
   gl_array* have = &driver[slot];
   int unit = slot >= kTexCoord && slot < kAttribute ? slot - kTexCoord : -1;
   if (want->set && pointer_function_exists(slot)) {
     uint32_t buffer;
-    const void* pointer = translate(want->pointer, &buffer);
+    const void* pointer = translate_array(want, &buffer);
     if (!have->pointer_known || !have->array.set ||
         have->array.pointer != pointer || have->buffer != buffer ||
         have->array.size != want->size || have->array.type != want->type ||
@@ -412,6 +441,7 @@ static uint32_t take_buffer(void) {
 }
 
 static void forget_span(uint32_t id) {
+  layout_changed();
   if (spans[id].buffer) {
     spare(spans[id].buffer);
   }
@@ -463,6 +493,7 @@ static void drop_range(var_object* o) {
   if (!o->length) {
     return;
   }
+  layout_changed();
   hle_var_ranges_remove(&ranges, o->base, NULL);
   drop_spans_of(o);
   o->base = 0;
@@ -513,6 +544,7 @@ static void upload(uintptr_t start, uintptr_t end) {
     return;
   }
   spans[id] = (var_span){ low, high - low, buffer };
+  layout_changed();
   if (++spans_made == 1) {
     cf_trace("cached vertex array ranges are buffer objects, flushed span by "
              "span: %lu bytes in the first", (unsigned long)(high - low));
@@ -530,6 +562,7 @@ static void vertex_array_range(int32_t length, const void* pointer) {
     return;
   }
   drop_range(o);
+  layout_changed();
   if (length > 0 && pointer) {
     // Memory another object's range held, freed and allocated again.
     uint32_t names[64];
@@ -572,6 +605,7 @@ static void vertex_array_parameteri(uint32_t pname, int32_t param) {
     return;
   }
   o->hint = param;
+  layout_changed();
   if (param != GL_STORAGE_CACHED_APPLE) {
     // What was uploaded for it is no longer what the GPU reads.
     drop_spans_of(o);
@@ -608,6 +642,7 @@ static void set_range_enabled(int on) {
   var_object* o = object_of(bound);
   if (o && o->range_enabled != on) {
     o->range_enabled = on;
+    layout_changed();
     apply_bound();
   }
 }
@@ -671,6 +706,7 @@ static void set_pointer(int slot, int32_t size, uint32_t type, int32_t stride,
   a->stride = stride;
   a->normalized = normalized;
   a->pointer = pointer;
+  a->translated_as_of = 0;
   apply(slot, a);
 }
 

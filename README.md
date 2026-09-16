@@ -215,8 +215,9 @@ bundles and localized strings, preferences, UUIDs and character sets.
   its buffer object. Ranges left to Apple's default or marked shared, whose
   memory the Mac's GPU read directly and the game did not always flush, stay
   client arrays; as buffer objects their effects smeared through walls. On a
-  Pentium 4 the time demo runs 10 to 35% faster with them. `HLE_VAR=0` leaves
-  them out. `make tests/var_ranges_test && tests/var_ranges_test` checks the
+  Pentium 4 the time demo runs 10 to 35% faster with them. Where an array
+  pointer leads is looked up again only when a range, span or storage hint
+  has changed. `HLE_VAR=0` leaves them out. `make tests/var_ranges_test && tests/var_ranges_test` checks the
   ranges they keep.
 - Apple's OpenGL has `GL_ATI_texture_env_combine3` on every renderer, and
   Halo's Direct3D layer sets its `MODULATE_ADD_ATI` combine function for
