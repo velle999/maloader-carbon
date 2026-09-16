@@ -120,6 +120,15 @@ executables at 0x400000, which is inside the game's image.
   what system calls the thread was blocked in, and from where. The blocked
   time is read every millisecond from `/proc/self/task/<id>/syscall` by a
   thread of its own, so the game's thread is not interrupted for it.
+- `HLE_PROBE=<text>` reports the GL state at the draws made with a vertex
+  program whose source holds `<text>` (`*` for every draw), once for each
+  distinct state: the vertex attributes and their first values, where the
+  first vertices land on the screen, the texture units with their combine
+  functions and textures, blending, and the texture stage states of the
+  game's Direct3D layer for the first two stages. `HLE_PROBE_COUNT` limits
+  the states reported (64 by default), and
+  `HLE_PROBE_TEXTURES=<directory>` saves each enabled texture as a PAM file
+  and a screenshot of the frame.
 - `HLE_VAR=0` leaves out the emulated vertex array extensions (see Windows,
   graphics, input and sound).
 - `HLE_RECOVER=0` lets the game's own fault (see Status) stop it with a crash

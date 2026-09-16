@@ -8,6 +8,8 @@
 #ifndef HLE_GL_VAR_H_
 #define HLE_GL_VAR_H_
 
+#include <stddef.h>
+
 // Whether the extensions are emulated: HLE_VAR is not 0, and the GL library
 // has the ARB buffer object functions.
 int hle_gl_var_enabled(void);
@@ -19,5 +21,9 @@ void* hle_gl_var_wrap(const char* name, void* real);
 
 // Forgets which buffer object is bound, for another context made current.
 void hle_gl_var_context_changed(void);
+
+// Describes the bound vertex array object's first arrays, as the game gave
+// them and as GL was last given them, into |out|.
+void hle_gl_var_describe(char* out, size_t size);
 
 #endif  // HLE_GL_VAR_H_

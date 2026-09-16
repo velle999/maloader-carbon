@@ -42,6 +42,7 @@
 #include "gl_var.h"
 
 #include <dlfcn.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -802,6 +803,64 @@ static uint8_t test_object(uint32_t object, uint32_t name) {
 }
 
 static void finish_object(uint32_t object, int32_t name) {
+}
+
+// ---------------------------------------------------------------------------
+// For gl_probe.c
+
+static void append(char* out, size_t size, size_t* n, const char* format,
+                   ...) {
+  if (*n + 1 >= size) {
+    return;
+  }
+  va_list args;
+  va_start(args, format);
+  int k = vsnprintf(out + *n, size - *n, format, args);
+  va_end(args);
+  if (k > 0) {
+    *n += (size_t)k < size - *n ? (size_t)k : size - *n - 1;
+  }
+}
+
+void hle_gl_var_describe(char* out, size_t size) {
+  static const struct {
+    int slot;
+    const char* name;
+  } kShown[] = {
+    { kVertex, "vertex" },          { kTexCoord, "texcoord0" },
+    { kAttribute, "attrib0" },      { kAttribute + 1, "attrib1" },
+    { kAttribute + 2, "attrib2" },  { kAttribute + 3, "attrib3" },
+  };
+  size_t n = 0;
+  if (!size) {
+    return;
+  }
+  out[0] = '\0';
+  if (!hle_gl_var_enabled()) {
+    append(out, size, &n, "vertex array objects are not emulated");
+    return;
+  }
+  const var_object* o = object_of(bound);
+  if (!o) {
+    append(out, size, &n, "vertex array object %u is gone", bound);
+    return;
+  }
+  append(out, size, &n, "vertex array object %u, range %#lx+%lu %s hint %#x",
+         bound, (unsigned long)o->base, (unsigned long)o->length,
+         o->range_enabled ? "enabled" : "disabled", (unsigned)o->hint);
+  for (size_t i = 0; i < sizeof(kShown) / sizeof(kShown[0]); i++) {
+    const client_array* a = &o->arrays[kShown[i].slot];
+    const gl_array* have = &driver[kShown[i].slot];
+    uint32_t buffer = 0;
+    const void* pointer = translate(a->pointer, &buffer);
+    append(out, size, &n,
+           "; %s %s%s %p (buffer %u at %p), GL given %s %p buffer %u%s",
+           kShown[i].name, a->enabled ? "on" : "off",
+           a->set ? "" : " unset", a->pointer, buffer, pointer,
+           !have->enable_known ? "?" : have->array.enabled ? "on" : "off",
+           have->array.pointer, have->buffer,
+           have->pointer_known ? "" : " (pointer unknown)");
+  }
 }
 
 // ---------------------------------------------------------------------------

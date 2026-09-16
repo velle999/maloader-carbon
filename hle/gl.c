@@ -27,6 +27,7 @@
 
 #include "arb_program.h"
 #include "gl_dispatch.h"
+#include "gl_probe.h"
 #include "gl_stats.h"
 #include "gl_var.h"
 #include "gui.h"
@@ -281,6 +282,7 @@ void __darwin_glProgramStringARB(uint32_t target, uint32_t format,
   }
   const char* text = rewritten ? rewritten : program;
   real_program_string(target, format, length, text);
+  hle_gl_probe_program(target, text, length);
   if (get_integer && reports < kMaxProgramReports) {
     int32_t position = -1;
     get_integer(GL_PROGRAM_ERROR_POSITION_ARB, &position);
@@ -311,8 +313,9 @@ static void* lookup_gl(const char* name) {
   if (!strcmp(name, "glProgramStringARB")) {
     return __darwin_glProgramStringARB;
   }
-  return hle_gl_stats_wrap(name,
-                           hle_gl_var_wrap(name, dlsym(RTLD_DEFAULT, name)));
+  return hle_gl_probe_wrap(
+      name, hle_gl_stats_wrap(
+                name, hle_gl_var_wrap(name, dlsym(RTLD_DEFAULT, name))));
 }
 
 // ---------------------------------------------------------------------------
@@ -464,6 +467,20 @@ static void destroy_format(hle_pixel_format* f) {
 static hle_gl_context* context_of(void* ref) {
   hle_gl_context* c = ref;
   return c && c->magic == kMagicContext ? c : NULL;
+}
+
+void* hle_gl_current_context(void) {
+  return current;
+}
+
+int hle_gl_is_context(void* ref) {
+  pthread_mutex_lock(&lock);
+  hle_gl_context* c = contexts;
+  while (c && c != ref) {
+    c = c->next;
+  }
+  pthread_mutex_unlock(&lock);
+  return c != NULL;
 }
 
 static void make_current(hle_gl_context* c) {

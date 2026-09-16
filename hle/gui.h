@@ -218,6 +218,10 @@ void hle_sdl_window_destroy(hle_window* window);
 // OpenGL (gl.c): moves the contexts drawing in |sdl_window| off it, before
 // the window is destroyed.
 void hle_gl_window_destroyed(void* sdl_window);
+// The AGL context current on this thread, and whether |ref| is a context
+// gl.c made, for gl_probe.c.
+void* hle_gl_current_context(void);
+int hle_gl_is_context(void* ref);
 
 // Screenshots (screenshot.c): Print Screen asks for one, and the next frame
 // swapped in |sdl_window| is saved.
