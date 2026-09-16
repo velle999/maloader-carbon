@@ -742,11 +742,12 @@ static void report_device_stages(void) {
       return;
     }
     fprintf(stderr,
-            "hle probe:   Direct3D stage %u: color %s(%#x, %#x)%s, alpha "
-            "%s(%#x, %#x)%s\n",
-            stage, texture_operation_name(states[1]), states[2], states[3],
-            swapped[0] ? " swapped" : "", texture_operation_name(states[4]),
-            states[5], states[6], swapped[1] ? " swapped" : "");
+            "hle probe:   Direct3D stage %u: color %s %#x(%#x, %#x)%s, alpha "
+            "%s %#x(%#x, %#x)%s\n",
+            stage, texture_operation_name(states[1]), states[1], states[2],
+            states[3], swapped[0] ? " swapped" : "",
+            texture_operation_name(states[4]), states[4], states[5],
+            states[6], swapped[1] ? " swapped" : "");
   }
 }
 

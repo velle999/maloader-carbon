@@ -505,14 +505,15 @@ static size_t append_places(char* line, size_t size, size_t n,
 }
 
 static void report_long_frame(unsigned frame, double wall_ms, double cpu_ms,
-                              double swap_ms, uint32_t count,
-                              const frame_sample* blocked,
+                              double waiting_ms, double swap_ms,
+                              uint32_t count, const frame_sample* blocked,
                               uint32_t blocked_count) {
   char line[2048];
   size_t n = (size_t)snprintf(
       line, sizeof(line),
-      "hle: long frame %u: %.0f ms, %.0f of them on this thread's CPU and "
-      "%.1f in the swap; CPU samples in ms", frame, wall_ms, cpu_ms, swap_ms);
+      "hle: long frame %u: %.0f ms, %.0f of them on this thread's CPU, %.0f "
+      "ready to run but waiting for a CPU, and %.1f in the swap; CPU samples "
+      "in ms", frame, wall_ms, cpu_ms, waiting_ms, swap_ms);
   n = append_places(line, sizeof(line), n, frame_samples, count, 0);
   double blocked_ms = 0;
   for (uint32_t i = 0; i < blocked_count; i++) {
@@ -526,14 +527,43 @@ static void report_long_frame(unsigned frame, double wall_ms, double cpu_ms,
   fprintf(stderr, "%s\n", line);
 }
 
+// The game's thread's time on a CPU and waiting in a run queue, in seconds,
+// as the scheduler counts them.
+static int read_schedstat(int fd, double* running, double* waiting) {
+  char text[128];
+  ssize_t n = fd >= 0 ? pread(fd, text, sizeof(text) - 1, 0) : -1;
+  unsigned long long on_cpu;
+  unsigned long long queued;
+  if (n <= 0) {
+    return 0;
+  }
+  text[n] = '\0';
+  if (sscanf(text, "%llu %llu", &on_cpu, &queued) != 2) {
+    return 0;
+  }
+  *running = on_cpu / 1e9;
+  *waiting = queued / 1e9;
+  return 1;
+}
+
 void hle_profile_frame(unsigned frame, double wall_ms, double swap_ms) {
   static double cpu_at;
+  static double waiting_at;
+  static int schedstat = -2;
   if (long_frame_ms <= 0) {
     return;
+  }
+  if (schedstat == -2) {
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/self/task/%d/schedstat", (int)pid);
+    schedstat = open(path, O_RDONLY | O_CLOEXEC);
   }
   struct timespec ts;
   clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
   double cpu = ts.tv_sec + ts.tv_nsec / 1e9;
+  double running = 0;
+  double waiting = 0;
+  read_schedstat(schedstat, &running, &waiting);
   static frame_sample blocked[kFrameSamples];
   while (__sync_lock_test_and_set(&blocked_busy, 1)) {
     sched_yield();
@@ -544,12 +574,14 @@ void hle_profile_frame(unsigned frame, double wall_ms, double swap_ms) {
   __sync_lock_release(&blocked_busy);
   frame_reading = 1;
   if (wall_ms >= long_frame_ms && cpu_at > 0) {
-    report_long_frame(frame, wall_ms, (cpu - cpu_at) * 1000, swap_ms,
+    report_long_frame(frame, wall_ms, (cpu - cpu_at) * 1000,
+                      (waiting - waiting_at) * 1000, swap_ms,
                       (uint32_t)frame_sample_count, blocked, blocked_count);
   }
   frame_sample_count = 0;
   frame_reading = 0;
   cpu_at = cpu;
+  waiting_at = waiting;
 }
 
 void hle_profile_thread(void) {
