@@ -107,6 +107,7 @@ WRAP(send)
 WRAP(sendto)
 WRAP(setsockopt)
 
+WRAP(__dynamic_cast)
 WRAP(glGetString)
 WRAP(glProgramStringARB)
 WRAP(exit)

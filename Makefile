@@ -122,6 +122,10 @@ tests/profile_test: tests/profile_test.c hle/profile.c hle/profile.h
 tests/var_ranges_test: tests/var_ranges_test.c hle/var_ranges.c hle/var_ranges.h
 	$(CC) $(CFLAGS) -o $@ tests/var_ranges_test.c hle/var_ranges.c
 
+tests/cast_test: tests/cast_test.cc hle/cxx_cast.c
+	$(CC) $(CFLAGS) -c -o tests/cxx_cast.o hle/cxx_cast.c
+	$(CXX) $(CXXFLAGS) -m32 -o $@ tests/cast_test.cc tests/cxx_cast.o -ldl -lpthread
+
 tests/combine3_test: tests/combine3_test.c hle/gl_combine3.c hle/gl_combine3.h
 	$(CC) $(CFLAGS) -o $@ tests/combine3_test.c hle/gl_combine3.c -ldl -lm -l:libSDL2-2.0.so.0 -l:libGL.so.1
 

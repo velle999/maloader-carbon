@@ -30,3 +30,8 @@ tests/files_test
 tests/crypto_test
 tests/arb_test
 tests/sound_test
+tests/fault_test
+tests/profile_test
+tests/var_ranges_test
+tests/combine3_test
+tests/cast_test

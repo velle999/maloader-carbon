@@ -285,6 +285,14 @@ bundles and localized strings, preferences, UUIDs and character sets.
 - A fixed `mmap` that replaces memory mapped by something other than the
   program says so on stderr, with the mappings it replaces; Linux replaces
   them silently.
+- The program's `dynamic_cast` calls are answered from a cache for its first
+  thread: the answer depends only on the object's vtable pointer and the two
+  types, and the game's Direct3D layer casts thousands of times a frame, so
+  libstdc++'s walk of the class hierarchy was over 3% of its CPU time.
+  Together with the vertex array lookups above, the time demo runs about 2%
+  faster. `HLE_CAST_CACHE=0` leaves the cache out, `HLE_CAST_STATS=1` counts
+  its answers, and `make tests/cast_test && tests/cast_test` checks it across
+  multiple, virtual and ambiguous bases.
 - glibc's allocator keeps every block in the heap, never gives the heap back,
   and grows it 64 MB at a time. The game draws a little past the ends of its
   vertex buffers, and NVIDIA's driver, copying them, faulted where a buffer
