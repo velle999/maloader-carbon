@@ -114,6 +114,11 @@ class MachO {
 
   bool is64() const { return is64_; }
 
+  // Whether each import names the library it comes from (MH_TWOLEVEL), in
+  // Bind::ordinal: 0 the image itself, 1-253 its LC_LOAD_DYLIB commands in
+  // order, 0xfe any image (dynamic lookup), 0xff the executable.
+  bool twolevel() const { return twolevel_; }
+
   int fd() const { return fd_; }
   size_t offset() const { return offset_; }
 
@@ -131,6 +136,7 @@ class MachO {
   vector<uint64_t> init_funcs_;
   uint64_t dyld_data_;
   bool is64_;
+  bool twolevel_;
   int ptrsize_;
   int fd_;
   size_t offset_;

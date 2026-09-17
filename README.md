@@ -310,6 +310,19 @@ bundles and localized strings, preferences, UUIDs and character sets.
 - Pre-10.5 i386 images: `__IMPORT,__jump_table` stubs, external relocations,
   LOCAL and ABSOLUTE indirect symbols, and a Darwin initial stack with `envp`
   and `apple[]`.
+- Pre-10.5 i386 libraries, such as the PhysX libraries a game bundles: their
+  exports come from the symbol table, since they have no export trie; their
+  local relocations and local non-lazy pointers slide with the library, which
+  is linked at address 0; and every image is mapped before any is bound, since
+  a library may import from the executable or from a library mapped after it.
+  A library's initializers run before those of the image that loads it.
+- Imports bind by the library each one names (the two-level namespace): a
+  game that exports its own `towlower` still gets the system's where it
+  imports it from libSystem. Lookups made at run time through
+  `CFBundleGetFunctionPointerForName` or `dlsym` on a system library never
+  return the game's own functions.
+- A Linux library named by its development link (`libz.so`) is found by its
+  runtime name (`libz.so.1`) when the development package is not installed.
 - An undefined symbol marked `N_REF_TO_WEAK` binds to the library that defines
   it. The bit is `N_WEAK_DEF` on a defined symbol; taking it for that bound
   `operator new` and `delete` to address 0.
@@ -338,7 +351,7 @@ bundles and localized strings, preferences, UUIDs and character sets.
   machine's CPU and memory; maloader's `sysctl` aborted on most queries.
 - Lookups the program makes at run time, through
   `CFBundleGetFunctionPointerForName` or `dlsym`, resolve the way its imports
-  do. `dlopen` of a Mac library that is not present as a Mach-O file returns
+  from system libraries do. `dlopen` of a Mac library that is not present as a Mach-O file returns
   a handle for exactly that, instead of exiting.
 
 ---

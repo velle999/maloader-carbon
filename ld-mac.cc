@@ -664,19 +664,49 @@ class MachOLoader {
     }
   }
 
-  void loadDylibs(const MachO& mach) {
+  // An image mapped with its exports registered, waiting for its binds.
+  struct MappedImage {
+    const MachO* mach;
+    intptr slide;
+    intptr base;
+    const Exports* own;  // this image's exports
+    // By LC_LOAD_DYLIB order: a Mach-O library's exports, or NULL for a
+    // system library, which libmac and Linux stand in for.
+    vector<const Exports*> libraries;
+  };
+
+  // A Linux library by the name the tables give, or by the runtime names a
+  // system without development packages has (libz.so.1 for libz.so).
+  static void* openLibrary(const string& so) {
+    static const char* const kSuffixes[] = { "", ".1", ".3", ".1.1" };
+    for (size_t i = 0; i < sizeof(kSuffixes) / sizeof(kSuffixes[0]); i++) {
+      if (void* handle = dlopen((so + kSuffixes[i]).c_str(),
+                                RTLD_LAZY | RTLD_GLOBAL)) {
+        return handle;
+      }
+    }
+    return NULL;
+  }
+
+  void mapDylibs(const MachO& mach, vector<MappedImage>* mapped,
+                 vector<const Exports*>* libraries) {
     for (size_t i = 0; i < mach.dylibs().size(); i++) {
       string dylib = mach.dylibs()[i];
 
-      if (!loaded_dylibs_.insert(dylib).second)
+      if (!loaded_dylibs_.insert(dylib).second) {
+        map<string, Exports*>::const_iterator found =
+            dylib_exports_.find(dylib);
+        libraries->push_back(found == dylib_exports_.end() ? NULL
+                                                          : found->second);
         continue;
+      }
 
       if (dylib_to_so_.count(dylib)) {
         const vector<string>& sos = dylib_to_so_[dylib];
         for (size_t i = 0; i < sos.size(); ++i) {
           const string& so = sos[i];
           LOG << "Loading " << so << " for " << dylib << endl;
-          if (!dlopen(so.c_str(), RTLD_LAZY | RTLD_GLOBAL)) {
+          if (!openLibrary(so)) {
             fprintf(stderr, "Couldn't load %s for %s: %s\n",
                     so.c_str(), dylib.c_str(), dlerror());
           }
@@ -687,22 +717,34 @@ class MachOLoader {
       // starts with /
       // TODO(hamaji): Do something?
       if (dylib[0] == '/') {
+        libraries->push_back(NULL);
         continue;
       }
 
-      unique_ptr<MachO> dylib_mach(loadDylib(dylib));
-      load(*dylib_mach);
+      // Kept for the process's life: its binds are applied only once every
+      // image is mapped.
+      images_.emplace_back(loadDylib(dylib));
+      image_exports_.emplace_back(new Exports());
+      Exports* exports = image_exports_.back().get();
+      dylib_exports_[dylib] = exports;
+      libraries->push_back(exports);
+      mapImage(*images_.back(), exports, mapped);
     }
   }
 
   // Resolves a Darwin symbol name, without its leading underscore, the way
-  // an import binds: Mach-O exports, renames, then libmac and the Linux
-  // libraries. NULL when nothing implements it. The game's own run-time
-  // lookups (CFBundleGetFunctionPointerForName, dlsym) come through here too.
-  char* resolveName(string name, const string& mach_name) {
-    const Exports::const_iterator export_found = exports_.find(mach_name);
-    if (export_found != exports_.end()) {
-      return (char*)export_found->second.addr;
+  // an import binds: Mach-O exports unless |mach_exports| is false, renames,
+  // then libmac and the Linux libraries. NULL when nothing implements it.
+  // The game's own run-time lookups (CFBundleGetFunctionPointerForName,
+  // dlsym) come through here too, and they ask for system libraries, which
+  // an image exporting a function by the same name does not stand in for.
+  char* resolveName(string name, const string& mach_name,
+                    bool mach_exports = true) {
+    if (mach_exports) {
+      const Exports::const_iterator export_found = exports_.find(mach_name);
+      if (export_found != exports_.end()) {
+        return (char*)export_found->second.addr;
+      }
     }
 #ifndef __x86_64__
     static const char* SUF_UNIX03 = "$UNIX2003";
@@ -728,7 +770,7 @@ class MachOLoader {
     if (!sym) {
       map<string, string>::const_iterator iter = symbol_to_so_.find(name);
       if (iter != symbol_to_so_.end()) {
-        if (dlopen(iter->second.c_str(), RTLD_LAZY | RTLD_GLOBAL)) {
+        if (openLibrary(iter->second)) {
           sym = (char*)dlsym(RTLD_DEFAULT, name.c_str());
         } else {
           fprintf(stderr, "Couldn't load %s for %s: %s\n",
@@ -739,7 +781,46 @@ class MachOLoader {
     return sym;
   }
 
-  void doBind(const MachO& mach, intptr slide) {
+  // Resolves an import of |image| from the library its ordinal names, as a
+  // two-level namespace image binds on Mac OS X: Age of Empires III exports
+  // its own towlower, and its imports of towlower name libSystem, not
+  // itself. An image with a flat namespace, or a dynamic lookup, looks
+  // everywhere.
+  char* resolveBind(const MappedImage& image, const MachO::Bind& bind,
+                    const string& name) {
+    if (!image.mach->twolevel()) {
+      return resolveName(name, bind.name);
+    }
+    const Exports* in = NULL;
+    switch (bind.ordinal) {
+      case 0:  // SELF_LIBRARY_ORDINAL
+        in = image.own;
+        break;
+      case 0xfe:  // DYNAMIC_LOOKUP_ORDINAL
+        return resolveName(name, bind.name);
+      case 0xff:  // EXECUTABLE_ORDINAL
+        in = executable_exports_;
+        break;
+      default:
+        if (bind.ordinal <= image.libraries.size()) {
+          in = image.libraries[bind.ordinal - 1];
+        }
+        break;
+    }
+    if (in) {
+      const Exports::const_iterator found = in->find(bind.name);
+      if (found != in->end()) {
+        return (char*)found->second.addr;
+      }
+    }
+    // A Mach-O library may re-export another's symbols; a system library's
+    // stand-ins are never the game's own.
+    return resolveName(name, bind.name, in != NULL);
+  }
+
+  void doBind(const MappedImage& image) {
+    const MachO& mach = *image.mach;
+    intptr slide = image.slide;
     string last_weak_name = "";
     char* last_weak_sym = NULL;
     size_t seen_weak_bind_index = 0;
@@ -811,7 +892,7 @@ class MachOLoader {
             }
           }
         } else {
-          sym = resolveName(name, bind->name);
+          sym = resolveBind(image, *bind, name);
           if (!sym) {
             LOG << name << ": undefined symbol" << endl;
             sym = undefinedSymbolAddress(name);
@@ -877,15 +958,25 @@ class MachOLoader {
                   seen_weak_binds_.end());
   }
 
-  void loadExports(const MachO& mach, intptr base, Exports* exports) {
-    exports->rehash(exports->size() + mach.exports().size());
+  // Registers |mach|'s exports in |own|, which its binds and a dlopen handle
+  // search, and in exports_, which flat lookups search. Two libraries built
+  // from the same static library export the same names; each binds to its
+  // own, and a flat lookup finds the first.
+  void loadExports(const MachO& mach, intptr base, Exports* own) {
+    own->rehash(own->size() + mach.exports().size());
+    exports_.rehash(exports_.size() + mach.exports().size());
+    size_t duplicates = 0;
     for (size_t i = 0; i < mach.exports().size(); i++) {
       MachO::Export exp = *mach.exports()[i];
       exp.addr += base;
-      // TODO(hamaji): Not 100% sure, but we may need to consider weak symbols.
-      if (!exports->insert(make_pair(exp.name, exp)).second) {
-        fprintf(stderr, "duplicated exported symbol: %s\n", exp.name.c_str());
+      own->insert(make_pair(exp.name, exp));
+      if (!exports_.insert(make_pair(exp.name, exp)).second) {
+        duplicates++;
       }
+    }
+    if (duplicates) {
+      LOG << mach.filename() << ": " << duplicates
+          << " exported symbols another image exports too" << endl;
     }
   }
 
@@ -893,26 +984,42 @@ class MachOLoader {
     g_file_map.add(mach, slide, base);
   }
 
+  // Maps |mach| and registers its exports, then does the same for its
+  // libraries, and queues their initializers ahead of its own. Nothing is
+  // bound yet: a library may import from the executable or from a library
+  // mapped after it, as the executable and its bundled PhysX libraries in
+  // Age of Empires III do, and dyld binds only once every image is there.
+  void mapImage(const MachO& mach, Exports* own,
+                vector<MappedImage>* mapped) {
+    MappedImage image;
+    image.mach = &mach;
+    image.slide = 0;
+    image.base = 0;
+    image.own = own;
+    loadSegments(mach, &image.slide, &image.base);
+    doRebase(mach, image.slide);
+    loadExports(mach, image.base, own);
+    mapDylibs(mach, mapped, &image.libraries);
+    loadInitFuncs(mach, image.slide);
+    mapped->push_back(image);
+  }
+
+  // Loads the executable, or with |exports| a library the program opens,
+  // whose handle keeps its exports there.
   void load(const MachO& mach, Exports* exports = NULL) {
     if (!exports) {
-      exports = &exports_;
+      image_exports_.emplace_back(new Exports());
+      exports = image_exports_.back().get();
+      if (!executable_exports_) {
+        executable_exports_ = exports;
+      }
     }
-    intptr slide = 0;
-    intptr base = 0;
-
-    loadSegments(mach, &slide, &base);
-
-    doRebase(mach, slide);
-
-    loadInitFuncs(mach, slide);
-
-    loadDylibs(mach);
-
-    loadExports(mach, base, exports);
-
-    doBind(mach, slide);
-
-    loadSymbols(mach, slide, base);
+    vector<MappedImage> mapped;
+    mapImage(mach, exports, &mapped);
+    for (size_t i = 0; i < mapped.size(); i++) {
+      doBind(mapped[i]);
+      loadSymbols(*mapped[i].mach, mapped[i].slide, mapped[i].base);
+    }
   }
 
   void setupDyldData(const MachO& mach) {
@@ -1024,6 +1131,10 @@ class MachOLoader {
   map<string, vector<string> > dylib_to_so_;
   map<string, string> symbol_to_so_;
   set<string> loaded_dylibs_;
+  vector<unique_ptr<MachO> > images_;
+  vector<unique_ptr<Exports> > image_exports_;
+  map<string, Exports*> dylib_exports_;  // by the path images load them by
+  const Exports* executable_exports_ = NULL;
 };
 
 #ifndef __x86_64__
@@ -1406,7 +1517,7 @@ static void* ld_mac_resolve_impl(const char* name) {
   if (!loader) {
     return dlsym(RTLD_DEFAULT, name);
   }
-  return loader->resolveName(name, string("_") + name);
+  return loader->resolveName(name, string("_") + name, false);
 }
 
 // What dlopen returns for a Mac library that is not here as a Mach-O file,

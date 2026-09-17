@@ -25,6 +25,7 @@
 // OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 // SUCH DAMAGE.
 
+#include <algorithm>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -86,6 +87,10 @@ struct macho_relocation_info {
 };
 #define R_SCATTERED 0x80000000
 #define GENERIC_RELOC_VANILLA 0
+#define GENERIC_RELOC_PAIR 1
+#define GENERIC_RELOC_SECTDIFF 2
+#define GENERIC_RELOC_PB_LA_PTR 3
+#define GENERIC_RELOC_LOCAL_SECTDIFF 4
 
 static uint64_t uleb128(const uint8_t*& p) {
   uint64_t r = 0;
@@ -143,8 +148,10 @@ class MachOImpl : public MachO {
 
   // Each entry of an indirect-symbol section names the import it holds.
   // |entry_size| is the pointer size, or 5 for an i386 jump-table stub.
+  // |non_lazy| marks a non-lazy pointer section, whose local entries point
+  // into the image with no relocation to say so.
   void readClassicBind(uint64_t addr, uint64_t size, uint32_t reserved1,
-                       uint32_t entry_size, uint8_t type,
+                       uint32_t entry_size, uint8_t type, bool non_lazy,
                        uint32_t* dysyms,
                        uint32_t* symtab,
                        const char* symstrtab) {
@@ -152,7 +159,14 @@ class MachOImpl : public MachO {
     for (uint64_t i = 0; i < count; i++) {
       uint32_t dysym = dysyms[reserved1 + i];
       // A local or absolute entry already holds its final value in an
-      // unslid image; binding it by its index bits would clobber it.
+      // unslid image; binding it by its index bits would clobber it. A
+      // local one slides with the image, as dyld slides it.
+      if (non_lazy && dysym == INDIRECT_SYMBOL_LOCAL) {
+        MachO::Rebase* rebase = new MachO::Rebase();
+        rebase->vmaddr = addr + i * entry_size;
+        rebase->type = REBASE_TYPE_POINTER;
+        rebases_.push_back(rebase);
+      }
       if (dysym & (INDIRECT_SYMBOL_LOCAL | INDIRECT_SYMBOL_ABS))
         continue;
       uint32_t index = dysym & 0x3fffffff;
@@ -164,7 +178,8 @@ class MachOImpl : public MachO {
       // nlist above is the 64-bit layout; a 32-bit n_value is 4 bytes.
       bind->value = is64_ ? sym->n_value : (uint32_t)sym->n_value;
       bind->type = type;
-      bind->ordinal = 1;
+      // Two-level namespace: the library the symbol comes from.
+      bind->ordinal = (sym->n_desc >> 8) & 0xff;
       // For a symbol the image defines, 0x80 in n_desc is N_WEAK_DEF. For
       // an undefined one the same bit is N_REF_TO_WEAK, and the definition
       // is in a library; binding that to its zero n_value made a NULL call.
@@ -587,6 +602,7 @@ MachOImpl::MachOImpl(const char* filename, int fd, size_t offset, size_t len,
        header->flags);
 
   is64_ = false;
+  twolevel_ = (header->flags & MH_TWOLEVEL) != 0;
   if (header->magic == MH_MAGIC_64) {
     is64_ = true;
   } else  if (header->magic != MH_MAGIC) {
@@ -608,6 +624,10 @@ MachOImpl::MachOImpl(const char* filename, int fd, size_t offset, size_t len,
   uint32_t* dysyms = NULL;
   uint32_t extreloff = 0;
   uint32_t nextrel = 0;
+  uint32_t locreloff = 0;
+  uint32_t nlocrel = 0;
+  uint32_t iextdefsym = 0;
+  uint32_t nextdefsym = 0;
   const char* symstrtab = NULL;
   dyld_info_command* dyinfo = NULL;
   vector<section_64*> bind_sections_64;
@@ -754,6 +774,10 @@ MachOImpl::MachOImpl(const char* filename, int fd, size_t offset, size_t len,
       }
       extreloff = dysymtab_cmd->extreloff;
       nextrel = dysymtab_cmd->nextrel;
+      locreloff = dysymtab_cmd->locreloff;
+      nlocrel = dysymtab_cmd->nlocrel;
+      iextdefsym = dysymtab_cmd->iextdefsym;
+      nextdefsym = dysymtab_cmd->nextdefsym;
       if (FLAGS_READ_DYSYMTAB) {
         for (uint32_t j = 0; j < dysymtab_cmd->nindirectsyms; j++) {
           uint32_t dysym = dysyms[j];
@@ -813,7 +837,12 @@ MachOImpl::MachOImpl(const char* filename, int fd, size_t offset, size_t len,
       break;
     }
 
-    case LC_LOAD_DYLIB: {
+    // Every library-loading command takes an ordinal, in order.
+    case LC_LOAD_DYLIB:
+    case LC_LOAD_WEAK_DYLIB:
+    case LC_REEXPORT_DYLIB:
+    case LC_LAZY_LOAD_DYLIB:
+    case LC_LOAD_UPWARD_DYLIB: {
       dylib* lib = &reinterpret_cast<dylib_command*>(cmds_ptr)->dylib;
       LOGF("dylib: '%s'\n", (char*)cmds_ptr + lib->name.offset);
       dylibs_.push_back((char*)cmds_ptr + lib->name.offset);
@@ -833,23 +862,113 @@ MachOImpl::MachOImpl(const char* filename, int fd, size_t offset, size_t len,
     for (size_t i = 0; i < bind_sections_64.size(); i++) {
       const section_64& sec = *bind_sections_64[i];
       readClassicBind(sec.addr, sec.size, sec.reserved1, ptrsize_,
-                      BIND_TYPE_POINTER, dysyms, symtab, symstrtab);
+                      BIND_TYPE_POINTER,
+                      (sec.flags & SECTION_TYPE) == S_NON_LAZY_SYMBOL_POINTERS,
+                      dysyms, symtab, symstrtab);
     }
     for (size_t i = 0; i < bind_sections_32.size(); i++) {
       const section& sec = *bind_sections_32[i];
       readClassicBind(sec.addr, sec.size, sec.reserved1, ptrsize_,
-                      BIND_TYPE_POINTER, dysyms, symtab, symstrtab);
+                      BIND_TYPE_POINTER,
+                      (sec.flags & SECTION_TYPE) == S_NON_LAZY_SYMBOL_POINTERS,
+                      dysyms, symtab, symstrtab);
     }
     for (size_t i = 0; i < jump_tables_.size(); i++) {
       const StubTable& table = jump_tables_[i];
       readClassicBind(table.addr, table.size, table.reserved1, 5,
-                      MachO::BIND_TYPE_JUMP_TABLE, dysyms, symtab, symstrtab);
+                      MachO::BIND_TYPE_JUMP_TABLE, false,
+                      dysyms, symtab, symstrtab);
+    }
+  }
+
+  // A classic image has no export trie: its exports are the symbol table's
+  // externally defined symbols, which LC_DYSYMTAB lists. They are kept as
+  // the trie keeps them, from the image's lowest mapped segment, and the
+  // loader adds where that segment landed. Without them nothing could bind
+  // to a library of the game's own, such as a bundled physics engine.
+  if (!dyinfo && need_exports_ && !is64_ && symtab && symstrtab &&
+      nextdefsym) {
+    uint64_t image_base = UINT64_MAX;
+    for (size_t i = 0; i < segments_.size(); i++) {
+      if (strcmp(segments_[i]->segname, SEG_PAGEZERO)) {
+        image_base = min(image_base, (uint64_t)segments_[i]->vmaddr);
+      }
+    }
+    for (uint32_t i = 0; image_base != UINT64_MAX && i < nextdefsym; i++) {
+      nlist* sym = (nlist*)(symtab + (iextdefsym + i) * 3);
+      if ((sym->n_type & N_TYPE_MASK) != N_SECT_TYPE) {
+        continue;
+      }
+      Export* exp = new Export;
+      exp->name = symstrtab + sym->n_strx;
+      exp->addr = (uint32_t)sym->n_value - image_base;
+      exp->flag = (sym->n_desc & N_WEAK_DEF)
+                      ? EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION
+                      : EXPORT_SYMBOL_FLAGS_KIND_REGULAR;
+      LOGF("classic export %s at %#llx\n", exp->name.c_str(),
+           (ull)exp->addr);
+      exports_.push_back(exp);
+    }
+  }
+
+  // A relocation's r_address counts from the first segment (an executable's
+  // __PAGEZERO, at 0), or with MH_SPLIT_SEGS from the first writable one.
+  uint64_t reloc_base = 0;
+  if (!is64_ && !segments_.empty()) {
+    reloc_base = segments_[0]->vmaddr;
+    if (header->flags & MH_SPLIT_SEGS) {
+      for (size_t i = 0; i < segments_.size(); i++) {
+        if (segments_[i]->initprot & VM_PROT_WRITE) {
+          reloc_base = segments_[i]->vmaddr;
+          break;
+        }
+      }
+    }
+  }
+
+  // Local relocations are a classic image's rebases: the pointers into itself
+  // that move when it is mapped away from its link address, as a library
+  // linked at 0 always is (Age of Empires III's PhysX libraries, whose
+  // initializer list is such pointers). A difference between two addresses
+  // in the image, or a PC-relative reference, does not change.
+  if (!dyinfo && nlocrel && !is64_ && !segments_.empty()) {
+    const macho_relocation_info* rels =
+        reinterpret_cast<macho_relocation_info*>(bin + locreloff);
+    for (uint32_t i = 0; i < nlocrel; i++) {
+      uint32_t word = (uint32_t)rels[i].r_address;
+      uint32_t address, type, length, pcrel;
+      if (word & R_SCATTERED) {
+        address = word & 0xffffff;
+        type = (word >> 24) & 0xf;
+        length = (word >> 28) & 3;
+        pcrel = (word >> 30) & 1;
+      } else {
+        address = word;
+        type = rels[i].r_type;
+        length = rels[i].r_length;
+        pcrel = rels[i].r_pcrel;
+      }
+      if (pcrel || type == GENERIC_RELOC_PAIR ||
+          type == GENERIC_RELOC_SECTDIFF ||
+          type == GENERIC_RELOC_LOCAL_SECTDIFF) {
+        continue;
+      }
+      if (length != 2 ||
+          (type != GENERIC_RELOC_VANILLA && type != GENERIC_RELOC_PB_LA_PTR)) {
+        fprintf(stderr, "%s: unsupported local relocation %u at %#x\n",
+                filename, i, (unsigned)address);
+        exit(1);
+      }
+      MachO::Rebase* rebase = new MachO::Rebase();
+      rebase->vmaddr = reloc_base + address;
+      rebase->type = REBASE_TYPE_POINTER;
+      rebases_.push_back(rebase);
     }
   }
 
   // External relocations point data at imports: CFString isa pointers, C++
   // typeinfo vtables, __cxa_pure_virtual slots. i386 keeps the addend in
-  // place, and r_address counts from segment 0 (__PAGEZERO, at 0).
+  // place.
   if (!dyinfo && nextrel && symtab && symstrtab) {
     const macho_relocation_info* rels =
         reinterpret_cast<macho_relocation_info*>(bin + extreloff);
@@ -864,10 +983,10 @@ MachOImpl::MachOImpl(const char* filename, int fd, size_t offset, size_t len,
       nlist* sym = (nlist*)(symtab + r.r_symbolnum * 3);
       MachO::Bind* bind = new MachO::Bind();
       bind->name = symstrtab + sym->n_strx;
-      bind->vmaddr = segments_[0]->vmaddr + (uint32_t)r.r_address;
+      bind->vmaddr = reloc_base + (uint32_t)r.r_address;
       bind->addend = 0;
       bind->type = MachO::BIND_TYPE_EXTERNAL_RELOC;
-      bind->ordinal = 1;
+      bind->ordinal = (sym->n_desc >> 8) & 0xff;
       bind->is_weak = false;
       bind->is_classic = true;
       binds_.push_back(bind);
