@@ -35,3 +35,4 @@ tests/profile_test
 tests/var_ranges_test
 tests/combine3_test
 tests/cast_test
+__pycache__/

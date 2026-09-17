@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Carbon Launcher
+Comment=Run Mac OS X applications for Intel under maloader-carbon
+Exec=@BINDIR@/carbon-launcher
+Icon=application-x-executable
+Terminal=false
+Categories=Utility;

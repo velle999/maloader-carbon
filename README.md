@@ -52,6 +52,43 @@ so; see `hle/game_faults.c`.
 `ld-mac` is linked `-no-pie`. A 32-bit kernel loads position-independent
 executables at 0x400000, which is inside the game's image.
 
+## Installer and launcher
+
+    make install            # into ~/.local; PREFIX=/usr/local for everyone
+
+puts the loader in `PREFIX/lib/maloader-carbon`, and two programs with menu
+entries in `PREFIX/bin`. Both are Python 3 with GTK 3 (PyGObject): without
+arguments they open a window, and with them they work on the command line.
+`make test-frontend` checks them without a display.
+
+- **halo-ce-installer** installs Halo: Combat Evolved from its Mac release,
+  Halo Universal 2.0: choose the disc image (`.dmg`, `.img`, `.iso`, read
+  with 7-Zip) or a folder with the disc's files, and where to install
+  (`~/Games/HaloCE` by default). It unpacks the game's installer package with
+  gzip and cpio, keeps the disc's own files in `Disc/Halo Universal` for the
+  game's disc check, makes the game's Mac home in `Home`, and can bring over
+  the saved games and settings of an earlier install. The game refuses a
+  folder with a period in its name anywhere in its path, so the installer
+  does too. It adds Halo to the applications menu, and to the desktop if
+  asked, with the game's own icon.
+
+      halo-ce-installer --source ~/Downloads/HaloMac.dmg --destination ~/Games/HaloCE
+
+- **carbon-launcher** runs Carbon applications for Intel (a bundle with
+  32-bit Intel code): add a `.app`, set its Mac home, a folder standing in for
+  its disc, full screen or a window, sound, a detailed log and any of the
+  settings below, then launch it, read its last log, or give it a menu entry.
+  Each app's settings are a JSON file in `~/.config/maloader-carbon/apps`, and
+  its last five logs are in `~/.local/state/maloader-carbon/logs`.
+
+      carbon-launcher add ~/Applications/Some.app --display window --menu-entry
+      carbon-launcher run some HLE_AUDIO_FRAMES=4096
+
+  An app that asks for a product key (Halo does, the first time) is asked
+  for it in a dialog, or on the terminal, only while its preferences hold no
+  accepted key. The key goes to that one run as `HLE_DIALOG_<id>`; the game
+  keeps it, and the launcher neither stores nor logs it.
+
 ## Configuration
 
 - `HLE_CD_PATH`: the game checks that its disc is in the drive. Point this

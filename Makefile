@@ -129,6 +129,35 @@ tests/cast_test: tests/cast_test.cc hle/cxx_cast.c
 tests/combine3_test: tests/combine3_test.c hle/gl_combine3.c hle/gl_combine3.h
 	$(CC) $(CFLAGS) -o $@ tests/combine3_test.c hle/gl_combine3.c -ldl -lm -l:libSDL2-2.0.so.0 -l:libGL.so.1
 
+# The loader and the frontend, for one user by default.
+PREFIX ?= $(HOME)/.local
+LOADERDIR = $(PREFIX)/lib/maloader-carbon
+FRONTENDDIR = $(PREFIX)/share/maloader-carbon/frontend
+FRONTEND_SCRIPTS = carbon-launcher halo-ce-installer
+
+install: ld-mac libmac.so
+	install -d $(DESTDIR)$(LOADERDIR) $(DESTDIR)$(FRONTENDDIR)/maloader_carbon \
+		$(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(PREFIX)/share/applications
+	install -m 755 ld-mac $(DESTDIR)$(LOADERDIR)/ld-mac
+	install -m 644 libmac.so $(DESTDIR)$(LOADERDIR)/libmac.so
+	install -m 644 frontend/maloader_carbon/*.py $(DESTDIR)$(FRONTENDDIR)/maloader_carbon/
+	for s in $(FRONTEND_SCRIPTS); do \
+		install -m 755 frontend/$$s $(DESTDIR)$(FRONTENDDIR)/$$s && \
+		ln -sf ../share/maloader-carbon/frontend/$$s $(DESTDIR)$(PREFIX)/bin/$$s && \
+		sed 's|@BINDIR@|$(PREFIX)/bin|' frontend/data/$$s.desktop.in \
+			> $(DESTDIR)$(PREFIX)/share/applications/maloader-carbon-$$s.desktop || exit 1; \
+	done
+
+uninstall:
+	rm -rf $(DESTDIR)$(LOADERDIR) $(DESTDIR)$(PREFIX)/share/maloader-carbon
+	for s in $(FRONTEND_SCRIPTS); do \
+		rm -f $(DESTDIR)$(PREFIX)/bin/$$s \
+			$(DESTDIR)$(PREFIX)/share/applications/maloader-carbon-$$s.desktop; \
+	done
+
+test-frontend:
+	python3 -m unittest discover -s frontend/tests
+
 dist:
 	cd /tmp && rm -fr maloader-$(VERSION) && git clone git@github.com:shinh/maloader.git && rm -fr maloader/.git && mv maloader maloader-$(VERSION) && tar -cvzf maloader-$(VERSION).tar.gz maloader-$(VERSION)
 

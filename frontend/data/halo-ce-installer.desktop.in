@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Halo: Combat Evolved Installer
+Comment=Install Halo's Mac release to run on 32-bit Linux
+Exec=@BINDIR@/halo-ce-installer
+Icon=system-software-install
+Terminal=false
+Categories=Game;
