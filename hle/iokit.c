@@ -5,8 +5,10 @@
 // IOKit, as far as the game looks.
 //
 // The registry holds the user's disc, when one is configured, as an
-// IOCDMedia with one IOMedia partition whose BSD name getmntinfo agrees
-// with. There are no HID devices, so input arrives as Carbon events.
+// IOCDMedia or IODVDMedia with one IOMedia partition whose BSD name
+// getmntinfo agrees with. The disc is whichever of the two the game looks
+// for: Halo came on a CD and Age of Empires III on a DVD. There are no HID
+// devices, so input arrives as Carbon events.
 // Objects are pointers, which fit an io_object_t on i386.
 
 #include <stdlib.h>
@@ -75,6 +77,9 @@ static io_object_t new_iterator(io_entry** items, int count) {
   return (io_object_t)(uintptr_t)it;
 }
 
+// MACH_PORT_NULL, which every IOKit call takes as the master port.
+const uint32_t kIOMasterPortDefault = 0;
+
 kern_return_t IOMasterPort(uint32_t bootstrap, uint32_t* port) {
   if (port) {
     *port = kMasterPort;
@@ -99,9 +104,14 @@ static io_object_t find_services(CFDictionaryRef matching) {
   CFTypeRef provider =
       matching ? cf_dict_get_ascii(matching, "IOProviderClass") : NULL;
   if (provider && CFGetTypeID(provider) == CFStringGetTypeID() &&
-      cf_string_is_ascii((CFStringRef)provider, "IOCDMedia") &&
       hle_cd_volume_name()) {
-    found[count++] = &cd_media;
+    if (cf_string_is_ascii((CFStringRef)provider, "IOCDMedia")) {
+      cd_media.class_name = "IOCDMedia";
+      found[count++] = &cd_media;
+    } else if (cf_string_is_ascii((CFStringRef)provider, "IODVDMedia")) {
+      cd_media.class_name = "IODVDMedia";
+      found[count++] = &cd_media;
+    }
   }
   if (matching) {
     CFRelease(matching);

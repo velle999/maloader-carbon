@@ -104,6 +104,11 @@ typedef struct hle_port {
   PixMapHandle pixmap;
   GDHandle device;
   uint8_t* pixels;  // owned by GWorlds from NewGWorld
+  // The QuickDraw font: a family number (0 is the system font), a style and
+  // a size in points (0 is the default size).
+  SInt16 text_font;
+  uint8_t text_face;
+  SInt16 text_size;
 } hle_port;
 
 enum {
@@ -208,6 +213,12 @@ typedef struct {
 int hle_display_modes(hle_display_mode* modes, int max);
 void hle_display_current(hle_display_mode* mode);
 int hle_display_captured(void);
+
+// QuickDraw (quickdraw.c): lays |coverage| (0-255) of |color| over the
+// port's pixel at (h, v), in port coordinates. Does nothing on a port
+// without pixels of its own or outside its bounds.
+void hle_port_blend(hle_port* port, int h, int v, int coverage,
+                    const RGBColor* color);
 
 // SDL (sdl.c)
 int hle_sdl_video(void);

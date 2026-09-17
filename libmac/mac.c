@@ -1303,6 +1303,20 @@ void __darwin___cxa_throw(char** obj) {
   abort();
 }
 
+// The first |little| in the first |len| bytes of |big|.
+char* strnstr(const char* big, const char* little, size_t len) {
+  size_t little_len = strlen(little);
+  if (little_len == 0) {
+    return (char*)big;
+  }
+  for (size_t i = 0; i + little_len <= len && big[i]; i++) {
+    if (big[i] == little[0] && strncmp(big + i, little, little_len) == 0) {
+      return (char*)big + i;
+    }
+  }
+  return NULL;
+}
+
 size_t strlcpy(char* dst, const char* src, size_t size) {
   LOGF("strlcpy: dst=%p src=%p size=%zu\n", dst, src, size);
   size_t src_size = strlen(src) + 1;  // +1 for '\0'
@@ -1749,9 +1763,9 @@ struct __darwin_pthread_mutex_t {
   char opaque[__DARWIN_PTHREAD_MUTEX_SIZE];
 };
 
-int __darwin_pthread_mutex_lock(struct __darwin_pthread_mutex_t *mutex) {
-  // convert pthread_mutex_t initialized by Mac's PTHREAD_MUTEX_INITIALIZER to
-  // that of Linux.
+// convert pthread_mutex_t initialized by Mac's PTHREAD_MUTEX_INITIALIZER to
+// that of Linux.
+static void convert_darwin_mutex(struct __darwin_pthread_mutex_t *mutex) {
   if (mutex->sig ==__DARWIN_PTHREAD_MUTEX_SIG_init) {
     pthread_mutex_t expected_value = PTHREAD_MUTEX_INITIALIZER;
     memcpy(mutex, &expected_value, sizeof(expected_value));
@@ -1759,13 +1773,23 @@ int __darwin_pthread_mutex_lock(struct __darwin_pthread_mutex_t *mutex) {
     pthread_mutex_t expected_value = PTHREAD_ERRORCHECK_MUTEX_INITIALIZER_NP;
     memcpy(mutex, &expected_value, sizeof(expected_value));
   } else if (mutex->sig ==__DARWIN_PTHREAD_RECURSIVE_MUTEX_SIG_init) {
-    pthread_mutex_t expected_value = PTHREAD_ERRORCHECK_MUTEX_INITIALIZER_NP;
+    pthread_mutex_t expected_value = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
     memcpy(mutex, &expected_value, sizeof(expected_value));
   } else if (mutex->sig ==__DARWIN_PTHREAD_FIRSTFIT_MUTEX_SIG_init) {
     pthread_mutex_t expected_value = PTHREAD_ADAPTIVE_MUTEX_INITIALIZER_NP;
     memcpy(mutex, &expected_value, sizeof(expected_value));
   }
+}
+
+int __darwin_pthread_mutex_lock(struct __darwin_pthread_mutex_t *mutex) {
+  convert_darwin_mutex(mutex);
   return pthread_mutex_lock((pthread_mutex_t*)mutex);
+}
+
+int __darwin_pthread_mutex_trylock(struct __darwin_pthread_mutex_t *mutex) {
+  convert_darwin_mutex(mutex);
+  // EBUSY is 16 on both.
+  return pthread_mutex_trylock((pthread_mutex_t*)mutex);
 }
 
 // Dummy implementation of Block.

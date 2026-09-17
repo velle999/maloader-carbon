@@ -4,9 +4,10 @@
 
 // CFArray and CFDictionary. Collections this library builds (property lists,
 // bundle info, preferences) retain what they hold and compare keys with
-// CFEqual, as CF's kCFType callbacks do. One created with NULL callbacks
-// holds raw pointers and compares them by address. The dictionaries involved
-// are small, so lookups are linear.
+// CFEqual, as CF's kCFType callbacks do, and so does one created with any
+// callbacks; kCFCopyStringDictionaryKeyCallBacks also copies string keys.
+// One created with NULL callbacks holds raw pointers and compares them by
+// address. The dictionaries involved are small, so lookups are linear.
 
 #include <stdlib.h>
 #include <string.h>
@@ -28,6 +29,49 @@ struct __CFDictionary {
   CFIndex count;
   CFIndex capacity;
   int cf_types;
+  int copy_string_keys;
+};
+
+// The callback structures. The collections here only look at which one they
+// were given; the functions are CF's own, for code that calls them.
+typedef struct {
+  CFIndex version;
+  CFTypeRef (*retain)(CFAllocatorRef allocator, CFTypeRef value);
+  void (*release)(CFAllocatorRef allocator, CFTypeRef value);
+  CFStringRef (*copyDescription)(CFTypeRef value);
+  unsigned int (*equal)(CFTypeRef a, CFTypeRef b);
+  CFHashCode (*hash)(CFTypeRef value);
+} cf_callbacks;
+
+static CFTypeRef callback_retain(CFAllocatorRef allocator, CFTypeRef value) {
+  return CFRetain(value);
+}
+
+static CFTypeRef callback_copy_string(CFAllocatorRef allocator,
+                                      CFTypeRef value) {
+  return CFStringCreateWithSubstring(NULL, value,
+                                     (CFRange){ 0, cf_string_length(value) });
+}
+
+static void callback_release(CFAllocatorRef allocator, CFTypeRef value) {
+  CFRelease(value);
+}
+
+static unsigned int callback_equal(CFTypeRef a, CFTypeRef b) {
+  return cf_equal(a, b);
+}
+
+const cf_callbacks kCFTypeArrayCallBacks = {
+  0, callback_retain, callback_release, NULL, callback_equal, NULL,
+};
+const cf_callbacks kCFTypeDictionaryKeyCallBacks = {
+  0, callback_retain, callback_release, NULL, callback_equal, cf_hash,
+};
+const cf_callbacks kCFCopyStringDictionaryKeyCallBacks = {
+  0, callback_copy_string, callback_release, NULL, callback_equal, cf_hash,
+};
+const cf_callbacks kCFTypeDictionaryValueCallBacks = {
+  0, callback_retain, callback_release, NULL, callback_equal, NULL,
 };
 
 // ---------------------------------------------------------------------------
@@ -123,6 +167,41 @@ CFTypeRef CFArrayGetValueAtIndex(CFArrayRef array, CFIndex i) {
   return array->values[i];
 }
 
+CFMutableArrayRef CFArrayCreateMutableCopy(CFAllocatorRef allocator,
+                                           CFIndex capacity, CFArrayRef array) {
+  struct __CFArray* copy = array_new(array->cf_types);
+  for (CFIndex i = 0; i < array->count; i++) {
+    cf_array_append(copy, array->values[i]);
+  }
+  return copy;
+}
+
+// The index of the first value in |range| equal to |value|; -1 when none is.
+CFIndex CFArrayGetFirstIndexOfValue(CFArrayRef array, CFRange range,
+                                    CFTypeRef value) {
+  for (CFIndex i = range.location; i < range.location + range.length; i++) {
+    if (array->cf_types ? cf_equal(array->values[i], value)
+                        : array->values[i] == value) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+// At the count, appends.
+void CFArraySetValueAtIndex(CFMutableArrayRef array, CFIndex i,
+                            CFTypeRef value) {
+  if (i == array->count) {
+    cf_array_append(array, value);
+    return;
+  }
+  if (array->cf_types) {
+    CFRetain(value);
+    CFRelease(array->values[i]);
+  }
+  array->values[i] = value;
+}
+
 void CFArrayApplyFunction(CFArrayRef array, CFRange range,
                           void (*applier)(CFTypeRef value, void* context),
                           void* context) {
@@ -215,7 +294,9 @@ void cf_dict_set(CFMutableDictionaryRef dict, CFTypeRef key, CFTypeRef value) {
     dict->keys = realloc(dict->keys, sizeof(CFTypeRef) * dict->capacity);
     dict->values = realloc(dict->values, sizeof(CFTypeRef) * dict->capacity);
   }
-  if (dict->cf_types) {
+  if (dict->copy_string_keys && cf_is(key, CF_TYPE_STRING)) {
+    key = callback_copy_string(NULL, key);
+  } else if (dict->cf_types) {
     CFRetain(key);
   }
   dict->keys[dict->count] = key;
@@ -274,7 +355,20 @@ CFMutableDictionaryRef CFDictionaryCreateMutable(CFAllocatorRef allocator,
                                                  CFIndex capacity,
                                                  const void* key_callbacks,
                                                  const void* value_callbacks) {
-  return dict_new(key_callbacks != NULL);
+  struct __CFDictionary* d = dict_new(key_callbacks != NULL);
+  d->copy_string_keys = key_callbacks == &kCFCopyStringDictionaryKeyCallBacks;
+  return d;
+}
+
+CFMutableDictionaryRef CFDictionaryCreateMutableCopy(CFAllocatorRef allocator,
+                                                     CFIndex capacity,
+                                                     CFDictionaryRef dict) {
+  struct __CFDictionary* copy = dict_new(dict->cf_types);
+  copy->copy_string_keys = dict->copy_string_keys;
+  for (CFIndex i = 0; i < dict->count; i++) {
+    cf_dict_set(copy, dict->keys[i], dict->values[i]);
+  }
+  return copy;
 }
 
 CFTypeRef CFDictionaryGetValue(CFDictionaryRef dict, CFTypeRef key) {

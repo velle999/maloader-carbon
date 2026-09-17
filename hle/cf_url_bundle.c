@@ -754,3 +754,50 @@ CFTypeRef CFBundleGetValueForInfoDictionaryKey(CFBundleRef bundle,
 CFStringRef CFBundleGetIdentifier(CFBundleRef bundle) {
   return cf_dict_get_ascii(info_dictionary(bundle), "CFBundleIdentifier");
 }
+
+enum { kUnknownCode = 0x3F3F3F3F };  // '????'
+
+// A four-character code from the Info.plist string |key|, else '????'.
+static UInt32 info_code(CFBundleRef bundle, const char* key) {
+  CFTypeRef value = cf_dict_get_ascii(info_dictionary(bundle), key);
+  UInt32 code = kUnknownCode;
+  if (value && CFGetTypeID(value) == CFStringGetTypeID() &&
+      cf_string_length(value) == 4) {
+    code = 0;
+    for (CFIndex i = 0; i < 4; i++) {
+      code = code << 8 | (cf_string_char(value, i) & 0xFF);
+    }
+  }
+  return code;
+}
+
+// The type and creator codes: from Contents/PkgInfo, else the Info.plist.
+void CFBundleGetPackageInfo(CFBundleRef bundle, UInt32* type,
+                            UInt32* creator) {
+  UInt32 t = kUnknownCode;
+  UInt32 c = kUnknownCode;
+  char path[PATH_MAX];
+  unsigned char bytes[8];
+  FILE* f = NULL;
+  if (bundle && !bundle->is_system_framework &&
+      snprintf(path, sizeof(path), "%s/Contents/PkgInfo", bundle->path) <
+          (int)sizeof(path)) {
+    f = fopen(path, "rb");
+  }
+  if (f && fread(bytes, 1, 8, f) == 8) {
+    t = (UInt32)bytes[0] << 24 | bytes[1] << 16 | bytes[2] << 8 | bytes[3];
+    c = (UInt32)bytes[4] << 24 | bytes[5] << 16 | bytes[6] << 8 | bytes[7];
+  } else if (bundle && !bundle->is_system_framework) {
+    t = info_code(bundle, "CFBundlePackageType");
+    c = info_code(bundle, "CFBundleSignature");
+  }
+  if (f) {
+    fclose(f);
+  }
+  if (type) {
+    *type = t;
+  }
+  if (creator) {
+    *creator = c;
+  }
+}

@@ -24,6 +24,11 @@ window, and its time demo runs at 38 to 68 frames a second. Loading a new
 part of a level still stalls a frame for a tenth of a second or more. The
 intro movies are not implemented.
 
+Age of Empires III (MacSoft's 2006 release, installed by copying its
+application from the DVD) is in progress: it loads its PhysX libraries,
+passes its checks, finds its DVD, loads its fonts and draws its loading
+screen. It stops where it opens Core Audio, which is not implemented.
+
 An import with no implementation is bound to a guard page, so its first use
 stops the program with its name, its caller and the registers.
 
@@ -36,8 +41,12 @@ so; see `hle/game_faults.c`.
 ## Requirements
 
 - 32-bit x86 Linux with glibc. The game's i386 code needs SSE2.
-- SDL 2 (`libSDL2-2.0.so.0`) and an OpenGL driver (`libGL.so.1`). SDL's
-  headers are in `third_party/`, so only the libraries are needed.
+- SDL 2 (`libSDL2-2.0.so.0`), FreeType (`libfreetype.so.6`) and an OpenGL
+  driver (`libGL.so.1`). SDL's and FreeType's headers are in `third_party/`,
+  so only the libraries are needed.
+- For a program that links the Mac's zlib or libxml2, Linux's (`libz.so.1`,
+  `libxml2.so.2`). fontconfig (`libfontconfig.so.1`), where it is installed,
+  finds the fonts a program names by a Mac system font's name.
 - `vm.mmap_min_addr` of 4096 or lower. Mac OS X i386 executables are not
   position-independent, and their `__TEXT` segment starts at 0x1000:
 
@@ -179,7 +188,7 @@ arguments they open a window, and with them they work on the command line.
 
 ## CoreFoundation
 
-`hle/` implements the 77 CoreFoundation calls the game imports, with the
+`hle/` implements the CoreFoundation calls the games import, with the
 Darwin i386 calling convention: strings (including the compiler's constant
 strings), arrays, dictionaries, numbers, data, XML property lists, URLs,
 bundles and localized strings, preferences, UUIDs and character sets.
@@ -232,7 +241,7 @@ bundles and localized strings, preferences, UUIDs and character sets.
 - The game copies `GL_EXTENSIONS` into a 4096-byte buffer, which a newer
   driver's list overruns, so it sees only the extensions whose names its
   executable contains, plus `GL_EXT_texture_rectangle` where the driver has
-  the ARB extension of the same enumerants.
+  the ARB extension of the same enumerants, and the Apple extensions below.
 - Apple's ARB program assembler accepts an `ALIAS` of a binding, as in
   `ALIAS oPos = result.position;`, and all 90 of the game's vertex programs
   use one. The ARB grammar aliases only declared variables, so NVIDIA's
@@ -252,7 +261,10 @@ bundles and localized strings, preferences, UUIDs and character sets.
   its buffer object. Ranges left to Apple's default or marked shared, whose
   memory the Mac's GPU read directly and the game did not always flush, stay
   client arrays; as buffer objects their effects smeared through walls. On a
-  Pentium 4 the time demo runs 10 to 35% faster with them. Where an array
+  Pentium 4 the time demo runs 10 to 35% faster with them.
+  `GL_APPLE_vertex_array_object` is named only to a program whose executable
+  names it: Age of Empires III gives some vertex buffers a shared range only
+  where it is, and uses that range for them either way. Where an array
   pointer leads is looked up again only when a range, span or storage hint
   has changed. `HLE_VAR=0` leaves them out. `make tests/var_ranges_test && tests/var_ranges_test` checks the
   ranges they keep.
@@ -281,7 +293,17 @@ bundles and localized strings, preferences, UUIDs and character sets.
   focus and the game has taken the mouse (it hid the pointer, or it warps
   it), the pointer is held in relative mode: motion moves the position the
   game reads, and the game's warps move only that position.
-- QuickDraw keeps ports, GWorlds with real pixels, colors and rectangles.
+- QuickDraw keeps ports, GWorlds with real pixels (1, 16 or 32 bits deep),
+  colors, palettes and rectangles.
+- Fonts are FreeType faces: the suitcases in a folder `FMActivateFonts`
+  names, read from their resource forks, and fonts a program activates from
+  memory. ATSUI styles and one-line layouts measure glyphs and draw them into
+  a port's pixels, anti-aliased except in a 1-bit GWorld, with synthetic bold
+  and italic where the font has neither. A name Mac OS X has a font for, such
+  as Helvetica or Lucida Grande, finds the closest font fontconfig knows when
+  the program has activated none by that name. QuickDraw measures text in a
+  port's font. `make tests/text_test && tests/text_test FONT_FILE
+  [SUITCASE_FOLDER]` checks it the way Age of Empires III draws a glyph.
 - Sound Manager channels play through one SDL audio device. A channel's
   buffers are mixed at their own rate times the channel's rate multiplier,
   with its volume and amplitude, and commands queued behind a buffer wait
@@ -290,7 +312,8 @@ bundles and localized strings, preferences, UUIDs and character sets.
   little-endian, as on an Intel Mac; compressed formats are silent.
   `make tests/sound_test && tests/sound_test` checks the mixing.
 - QuickTime reports no movies, so the intro is skipped. IOKit shows the
-  disc and no HID devices.
+  disc, as a CD or a DVD, whichever the program looks for, and no HID
+  devices.
 
 ## Tools
 
@@ -323,6 +346,11 @@ bundles and localized strings, preferences, UUIDs and character sets.
   return the game's own functions.
 - A Linux library named by its development link (`libz.so`) is found by its
   runtime name (`libz.so.1`) when the development package is not installed.
+- A Darwin `pthread_cond_t` is 28 bytes and glibc's 32, so each of a
+  program's condition variables holds a pointer to a glibc one of its own,
+  made on first use when it was statically initialized. Timed waits answer
+  Darwin's `ETIMEDOUT`. A mutex from `PTHREAD_RECURSIVE_MUTEX_INITIALIZER` is
+  recursive; maloader made it error-checking.
 - An undefined symbol marked `N_REF_TO_WEAK` binds to the library that defines
   it. The bit is `N_WEAK_DEF` on a defined symbol; taking it for that bound
   `operator new` and `delete` to address 0.

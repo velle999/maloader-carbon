@@ -3,7 +3,8 @@
 // Simplified BSD License or GPLv3, like the rest of this tree.
 
 // Multiprocessing Services over pthreads: tasks, message queues,
-// semaphores and event groups.
+// semaphores, event groups and critical regions, and the atomic arithmetic
+// of Driver Services and Open Transport.
 //
 // A task runs its entry point under sigsetjmp, so MPExit and MPTerminateTask
 // leave it with siglongjmp. glibc's pthread_exit would unwind instead, and
@@ -47,6 +48,7 @@ enum {
   kMagicQueue = 'MPqu',
   kMagicSemaphore = 'MPsm',
   kMagicEvent = 'MPev',
+  kMagicCriticalRegion = 'MPcr',
 };
 
 // How long a wait sleeps before it looks for a termination request.
@@ -518,6 +520,95 @@ int MPWaitForEvent(mp_event* e, uint32_t* flags, int32_t timeout) {
 }
 
 // ---------------------------------------------------------------------------
+// Critical regions: a lock the thread holding it may enter again, released
+// when it has exited as many times. The owner is a thread, not an MP task,
+// as the game enters them from threads it made with pthread_create too.
+
+typedef struct {
+  uint32_t magic;
+  pthread_mutex_t lock;
+  pthread_cond_t cond;
+  pthread_t owner;
+  uint32_t depth;
+  int deleted;
+} mp_critical_region;
+
+int MPCreateCriticalRegion(mp_critical_region** out) {
+  if (!out) {
+    return paramErr;
+  }
+  mp_critical_region* r = calloc(1, sizeof(*r));
+  r->magic = kMagicCriticalRegion;
+  pthread_mutex_init(&r->lock, NULL);
+  init_cond(&r->cond);
+  *out = r;
+  return noErr;
+}
+
+int MPDeleteCriticalRegion(mp_critical_region* r) {
+  if (!r || r->magic != kMagicCriticalRegion) {
+    return kMPInvalidIDErr;
+  }
+  pthread_mutex_lock(&r->lock);
+  r->deleted = 1;
+  r->magic = 0;
+  pthread_cond_broadcast(&r->cond);
+  pthread_mutex_unlock(&r->lock);
+  return noErr;
+}
+
+int MPEnterCriticalRegion(mp_critical_region* r, int32_t timeout) {
+  if (!r || r->magic != kMagicCriticalRegion) {
+    return kMPInvalidIDErr;
+  }
+  pthread_t self = pthread_self();
+  pthread_mutex_lock(&r->lock);
+  int err = noErr;
+  if (r->depth && pthread_equal(r->owner, self)) {
+    r->depth++;
+    pthread_mutex_unlock(&r->lock);
+    return noErr;
+  }
+  uint64_t deadline = deadline_after(timeout);
+  while (r->depth) {
+    if (r->deleted) {
+      err = kMPDeletedErr;
+      break;
+    }
+    if (terminating()) {
+      pthread_mutex_unlock(&r->lock);
+      checkpoint();
+    }
+    if (wait_slice(&r->cond, &r->lock, deadline) == ETIMEDOUT) {
+      err = kMPTimeoutErr;
+      break;
+    }
+  }
+  if (err == noErr) {
+    r->owner = self;
+    r->depth = 1;
+  }
+  pthread_mutex_unlock(&r->lock);
+  return err;
+}
+
+int MPExitCriticalRegion(mp_critical_region* r) {
+  if (!r || r->magic != kMagicCriticalRegion) {
+    return kMPInvalidIDErr;
+  }
+  pthread_mutex_lock(&r->lock);
+  int err = noErr;
+  if (!r->depth || !pthread_equal(r->owner, pthread_self())) {
+    // Only the thread holding the region can leave it.
+    err = kMPInsufficientResourcesErr;
+  } else if (--r->depth == 0) {
+    pthread_cond_signal(&r->cond);
+  }
+  pthread_mutex_unlock(&r->lock);
+  return err;
+}
+
+// ---------------------------------------------------------------------------
 // Aligned allocation
 
 // |alignment| is a power of two's exponent; 254 asks for a page and 255 for
@@ -546,4 +637,25 @@ void* MPAllocateAligned(uint32_t size, uint8_t alignment, uint32_t options) {
 
 void MPFree(void* p) {
   free(p);
+}
+
+// ---------------------------------------------------------------------------
+// Atomic arithmetic. Each returns the value it stored.
+
+int32_t IncrementAtomic(int32_t* value) {
+  return __sync_add_and_fetch(value, 1);
+}
+
+int32_t DecrementAtomic(int32_t* value) {
+  return __sync_sub_and_fetch(value, 1);
+}
+
+int32_t OTAtomicAdd32(int32_t amount, int32_t* value) {
+  return __sync_add_and_fetch(value, amount);
+}
+
+// A Boolean result fills EAX.
+unsigned int CompareAndSwap(uint32_t old_value, uint32_t new_value,
+                            uint32_t* address) {
+  return __sync_bool_compare_and_swap(address, old_value, new_value);
 }

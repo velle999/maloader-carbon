@@ -378,6 +378,19 @@ int SetWindowBounds(void* ref, UInt16 region, const Rect* bounds) {
   return noErr;
 }
 
+// Regions are rectangles here, so a window region is its bounds.
+int GetWindowRegion(void* ref, UInt16 region, RgnHandle rgn) {
+  if (!rgn) {
+    return paramErr;
+  }
+  Rect r;
+  int err = GetWindowBounds(ref, region, &r);
+  if (err == noErr) {
+    (*rgn)->rgnBBox = r;
+  }
+  return err;
+}
+
 Rect* GetWindowPortBounds(void* ref, Rect* out) {
   hle_window* w = hle_window_from(ref);
   if (out) {

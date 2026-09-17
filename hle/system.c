@@ -131,6 +131,11 @@ uint64_t UpTime(void) {
   return monotonic_ns();
 }
 
+// An UnsignedWide, low word first: a 64-bit count of microseconds.
+void Microseconds(uint64_t* microseconds) {
+  *microseconds = monotonic_ns() / 1000u;
+}
+
 // A Duration counts milliseconds when positive, microseconds when negative.
 uint64_t DurationToAbsolute(int32_t duration) {
   return duration >= 0 ? (uint64_t)duration * 1000000u

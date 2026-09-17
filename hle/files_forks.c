@@ -307,6 +307,15 @@ int FSCloseFork(SInt16 refnum) {
   return noErr;
 }
 
+// Writes reach the kernel as they are made, so nothing is left to flush
+// that the game ending would lose. The disk itself is not synced.
+int FSFlushFork(SInt16 refnum) {
+  pthread_mutex_lock(&forks_lock);
+  fork_entry* f = fork_for(refnum);
+  pthread_mutex_unlock(&forks_lock);
+  return f ? noErr : errFSBadForkRef;
+}
+
 int FSGetForkSize(SInt16 refnum, SInt64* size) {
   pthread_mutex_lock(&forks_lock);
   fork_entry* f = fork_for(refnum);

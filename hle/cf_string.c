@@ -12,7 +12,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <wctype.h>
 
 #include "cf.h"
 
@@ -494,6 +493,45 @@ CFMutableStringRef CFStringCreateMutableWithExternalCharactersNoCopy(
   return s;
 }
 
+// A Boolean argument is only its low byte.
+CFStringRef CFStringCreateWithBytes(CFAllocatorRef allocator,
+                                    const UInt8* bytes, CFIndex length,
+                                    CFStringEncoding encoding,
+                                    unsigned int external_representation) {
+  CFIndex chars_length;
+  UniChar* chars = decode(bytes, length, encoding, &chars_length);
+  return chars ? string_new(chars, chars_length, 0) : NULL;
+}
+
+CFStringRef CFStringCreateWithSubstring(CFAllocatorRef allocator,
+                                        CFStringRef str, CFRange range) {
+  UniChar* chars = malloc(sizeof(UniChar) * (range.length > 0 ? range.length
+                                                              : 1));
+  for (CFIndex i = 0; i < range.length; i++) {
+    chars[i] = cf_string_char(str, range.location + i);
+  }
+  return string_new(chars, range.length, 0);
+}
+
+// Points |str| at the caller's buffer, which it changes in place until a
+// change outgrows |capacity|.
+void CFStringSetExternalCharactersNoCopy(CFMutableStringRef str,
+                                         UniChar* chars, CFIndex length,
+                                         CFIndex capacity) {
+  if (is_constant(str) || !(str->flags & CF_STRING_MUTABLE)) {
+    fprintf(stderr,
+            "hle: CFStringSetExternalCharactersNoCopy on an immutable string\n");
+    return;
+  }
+  if (!(str->flags & CF_STRING_EXTERNAL)) {
+    free(str->chars);
+  }
+  str->flags |= CF_STRING_EXTERNAL;
+  str->chars = chars;
+  str->length = length;
+  str->capacity = capacity;
+}
+
 // ---------------------------------------------------------------------------
 // Reading
 
@@ -505,14 +543,52 @@ unsigned int CFStringGetCharacterAtIndex(CFStringRef str, CFIndex index) {
   return cf_string_char(str, index);
 }
 
+// Characters past the end read as zero. Age of Empires III asks for one
+// more than the length, and copies the result as a NUL-terminated string.
 void CFStringGetCharacters(CFStringRef str, CFRange range, UniChar* buffer) {
+  CFIndex length = cf_string_length(str);
   for (CFIndex i = 0; i < range.length; i++) {
-    buffer[i] = cf_string_char(str, range.location + i);
+    CFIndex at = range.location + i;
+    buffer[i] = at >= 0 && at < length ? cf_string_char(str, at) : 0;
   }
 }
 
 CFStringEncoding CFStringGetSystemEncoding(void) {
   return kCFStringEncodingMacRoman;
+}
+
+// Only a constant ASCII string has its bytes at hand; for anything else
+// the caller copies them out with CFStringGetCString.
+const char* CFStringGetCStringPtr(CFStringRef str, CFStringEncoding encoding) {
+  if (!str || !is_constant(str)) {
+    return NULL;
+  }
+  const cf_constant_string* c = (const cf_constant_string*)str;
+  if (c->base.info == CF_CONSTANT_UTF16_INFO) {
+    return NULL;
+  }
+  if (encoding != kCFStringEncodingMacRoman &&
+      encoding != kCFStringEncodingASCII &&
+      encoding != kCFStringEncodingUTF8 &&
+      encoding != kCFStringEncodingISOLatin1 &&
+      encoding != kCFStringEncodingWindowsLatin1) {
+    return NULL;
+  }
+  for (long i = 0; i < c->length; i++) {
+    if ((unsigned char)c->bytes[i] >= 0x80) {
+      return NULL;
+    }
+  }
+  return c->bytes;
+}
+
+// The number at the start of the string, after any white space, in the
+// C locale's notation; 0 when there is none.
+double CFStringGetDoubleValue(CFStringRef str) {
+  char* utf8 = cf_string_utf8(str);
+  double value = strtod(utf8, NULL);
+  free(utf8);
+  return value;
 }
 
 CFIndex CFStringGetBytes(CFStringRef str, CFRange range,
@@ -647,8 +723,58 @@ int CFStringGetPascalString(CFStringRef str, unsigned char* buffer,
 // ---------------------------------------------------------------------------
 // Mutation
 
+// Case mapping for Latin, Greek and Cyrillic letters, which is what the
+// games' languages use. The C library's towlower and towupper map only ASCII
+// in the C locale the game runs in.
+static UniChar to_lower(UniChar c) {
+  if (c < 0x80) {
+    return (UniChar)tolower(c);
+  }
+  if ((c >= 0xC0 && c <= 0xDE && c != 0xD7) || (c >= 0x391 && c <= 0x3AB) ||
+      (c >= 0x410 && c <= 0x42F)) {
+    return c + 0x20;
+  }
+  if (c >= 0x400 && c <= 0x40F) {
+    return c + 0x50;
+  }
+  if (c == 0x178) {
+    return 0xFF;
+  }
+  if ((c >= 0x100 && c <= 0x137) || (c >= 0x14A && c <= 0x177)) {
+    return c | 1;
+  }
+  if ((c >= 0x139 && c <= 0x148) || (c >= 0x179 && c <= 0x17E)) {
+    return (c & 1) ? c + 1 : c;
+  }
+  return c;
+}
+
+static UniChar to_upper(UniChar c) {
+  if (c < 0x80) {
+    return (UniChar)toupper(c);
+  }
+  if ((c >= 0xE0 && c <= 0xFE && c != 0xF7) || (c >= 0x3B1 && c <= 0x3CB &&
+                                                c != 0x3C2) ||
+      (c >= 0x430 && c <= 0x44F)) {
+    return c - 0x20;
+  }
+  if (c >= 0x450 && c <= 0x45F) {
+    return c - 0x50;
+  }
+  if (c == 0xFF) {
+    return 0x178;
+  }
+  if ((c >= 0x100 && c <= 0x137) || (c >= 0x14A && c <= 0x177)) {
+    return c & ~1;
+  }
+  if ((c >= 0x139 && c <= 0x148) || (c >= 0x179 && c <= 0x17E)) {
+    return (c & 1) ? c : c - 1;
+  }
+  return c;
+}
+
 static UniChar fold(UniChar c) {
-  return c < 0x80 ? (UniChar)tolower(c) : (UniChar)towlower(c);
+  return to_lower(c);
 }
 
 enum {
@@ -734,6 +860,140 @@ void CFStringLowercase(CFMutableStringRef str, CFLocaleRef locale) {
   for (CFIndex i = 0; i < str->length; i++) {
     str->chars[i] = fold(str->chars[i]);
   }
+}
+
+static int check_mutable(CFStringRef str, const char* call) {
+  if (!str || is_constant(str) || !(str->flags & CF_STRING_MUTABLE)) {
+    fprintf(stderr, "hle: %s on an immutable string\n", call);
+    return 0;
+  }
+  return 1;
+}
+
+void CFStringUppercase(CFMutableStringRef str, CFLocaleRef locale) {
+  if (!check_mutable(str, "CFStringUppercase")) {
+    return;
+  }
+  for (CFIndex i = 0; i < str->length; i++) {
+    str->chars[i] = to_upper(str->chars[i]);
+  }
+}
+
+void CFStringAppend(CFMutableStringRef str, CFStringRef appended) {
+  if (!check_mutable(str, "CFStringAppend")) {
+    return;
+  }
+  CFIndex n;
+  UniChar* chars = copy_chars(appended, &n);
+  string_replace(str, (CFRange){ str->length, 0 }, chars, n);
+  free(chars);
+}
+
+void CFStringAppendCString(CFMutableStringRef str, const char* c_str,
+                           CFStringEncoding encoding) {
+  if (!check_mutable(str, "CFStringAppendCString")) {
+    return;
+  }
+  CFIndex n;
+  UniChar* chars = decode((const UInt8*)c_str, strlen(c_str), encoding, &n);
+  if (chars) {
+    string_replace(str, (CFRange){ str->length, 0 }, chars, n);
+    free(chars);
+  }
+}
+
+void CFStringDelete(CFMutableStringRef str, CFRange range) {
+  if (!check_mutable(str, "CFStringDelete")) {
+    return;
+  }
+  string_replace(str, range, NULL, 0);
+}
+
+static int is_white_space(UniChar c) {
+  return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' ||
+         c == '\f' || c == 0x85 || c == 0xA0 || c == 0x1680 ||
+         (c >= 0x2000 && c <= 0x200A) || c == 0x2028 || c == 0x2029 ||
+         c == 0x202F || c == 0x205F || c == 0x3000;
+}
+
+void CFStringTrimWhitespace(CFMutableStringRef str) {
+  if (!check_mutable(str, "CFStringTrimWhitespace")) {
+    return;
+  }
+  CFIndex end = str->length;
+  while (end > 0 && is_white_space(str->chars[end - 1])) {
+    end--;
+  }
+  string_replace(str, (CFRange){ end, str->length - end }, NULL, 0);
+  CFIndex start = 0;
+  while (start < str->length && is_white_space(str->chars[start])) {
+    start++;
+  }
+  string_replace(str, (CFRange){ 0, start }, NULL, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Comparison
+
+enum {
+  kCFCompareNumerically = 64,
+};
+
+// A CFComparisonResult: -1, 0 or 1.
+int CFStringCompare(CFStringRef a, CFStringRef b, CFOptionFlags options) {
+  CFIndex na = cf_string_length(a);
+  CFIndex nb = cf_string_length(b);
+  CFIndex i = 0;
+  CFIndex j = 0;
+  while (i < na && j < nb) {
+    UniChar ca = cf_string_char(a, i);
+    UniChar cb = cf_string_char(b, j);
+    if ((options & kCFCompareNumerically) && ca >= '0' && ca <= '9' &&
+        cb >= '0' && cb <= '9') {
+      // Digit runs compare by value: skip leading zeros, then the longer
+      // run is larger, then the first differing digit decides.
+      while (i < na && cf_string_char(a, i) == '0') {
+        i++;
+      }
+      while (j < nb && cf_string_char(b, j) == '0') {
+        j++;
+      }
+      CFIndex ea = i;
+      while (ea < na && cf_string_char(a, ea) >= '0' &&
+             cf_string_char(a, ea) <= '9') {
+        ea++;
+      }
+      CFIndex eb = j;
+      while (eb < nb && cf_string_char(b, eb) >= '0' &&
+             cf_string_char(b, eb) <= '9') {
+        eb++;
+      }
+      if (ea - i != eb - j) {
+        return ea - i < eb - j ? -1 : 1;
+      }
+      for (; i < ea; i++, j++) {
+        UniChar da = cf_string_char(a, i);
+        UniChar db = cf_string_char(b, j);
+        if (da != db) {
+          return da < db ? -1 : 1;
+        }
+      }
+      continue;
+    }
+    if (options & kCFCompareCaseInsensitive) {
+      ca = fold(ca);
+      cb = fold(cb);
+    }
+    if (ca != cb) {
+      return ca < cb ? -1 : 1;
+    }
+    i++;
+    j++;
+  }
+  if (i < na) {
+    return 1;
+  }
+  return j < nb ? -1 : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -957,6 +1217,20 @@ CFStringRef CFStringCreateWithFormatAndArguments(CFAllocatorRef allocator,
   cf_buf_free(&out);
   free(fmt);
   return result;
+}
+
+void CFStringAppendFormat(CFMutableStringRef str, CFDictionaryRef options,
+                          CFStringRef format, ...) {
+  if (!check_mutable(str, "CFStringAppendFormat")) {
+    return;
+  }
+  va_list ap;
+  va_start(ap, format);
+  CFStringRef appended =
+      CFStringCreateWithFormatAndArguments(NULL, options, format, ap);
+  va_end(ap);
+  CFStringAppend(str, appended);
+  CFRelease(appended);
 }
 
 CFStringRef CFStringCreateWithFormat(CFAllocatorRef allocator,

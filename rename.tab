@@ -167,6 +167,15 @@ WRAP(pthread_rwlockattr_setpshared)
 
 // Do we need workaround for other initializer macro?
 WRAP(pthread_mutex_lock)
+WRAP(pthread_mutex_trylock)
+
+// hle/threads.c: a Darwin pthread_cond_t is smaller than glibc's.
+WRAP(pthread_cond_init)
+WRAP(pthread_cond_destroy)
+WRAP(pthread_cond_signal)
+WRAP(pthread_cond_broadcast)
+WRAP(pthread_cond_wait)
+WRAP(pthread_cond_timedwait)
 
 WRAP(dlopen)
 WRAP(dlclose)

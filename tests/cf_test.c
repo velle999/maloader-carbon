@@ -155,6 +155,98 @@ static void test_strings(void) {
   CFRelease(ext);
 }
 
+void CFStringAppend(CFMutableStringRef, CFStringRef);
+void CFStringAppendCString(CFMutableStringRef, const char*, CFStringEncoding);
+void CFStringAppendFormat(CFMutableStringRef, CFDictionaryRef, CFStringRef,
+                          ...);
+void CFStringDelete(CFMutableStringRef, CFRange);
+void CFStringTrimWhitespace(CFMutableStringRef);
+void CFStringUppercase(CFMutableStringRef, CFLocaleRef);
+int CFStringCompare(CFStringRef, CFStringRef, CFOptionFlags);
+const char* CFStringGetCStringPtr(CFStringRef, CFStringEncoding);
+double CFStringGetDoubleValue(CFStringRef);
+void CFStringGetCharacters(CFStringRef, CFRange, UniChar*);
+CFMutableStringRef CFStringCreateMutable(CFAllocatorRef, CFIndex);
+extern const void kCFTypeArrayCallBacks;
+extern const void kCFCopyStringDictionaryKeyCallBacks;
+extern const void kCFTypeDictionaryValueCallBacks;
+CFMutableArrayRef CFArrayCreateMutable(CFAllocatorRef, CFIndex, const void*);
+void CFArrayAppendValue(CFMutableArrayRef, CFTypeRef);
+CFMutableArrayRef CFArrayCreateMutableCopy(CFAllocatorRef, CFIndex,
+                                           CFArrayRef);
+CFIndex CFArrayGetFirstIndexOfValue(CFArrayRef, CFRange, CFTypeRef);
+void CFArraySetValueAtIndex(CFMutableArrayRef, CFIndex, CFTypeRef);
+CFIndex CFArrayGetCount(CFArrayRef);
+CFMutableDictionaryRef CFDictionaryCreateMutable(CFAllocatorRef, CFIndex,
+                                                 const void*, const void*);
+void CFDictionarySetValue(CFMutableDictionaryRef, CFTypeRef, CFTypeRef);
+CFTypeRef CFDictionaryGetValue(CFDictionaryRef, CFTypeRef);
+
+CONSTANT(k_padded, " \t Age 3 \n");
+CONSTANT(k_file2, "file2");
+CONSTANT(k_file10, "file10");
+CONSTANT(k_count_format, " %d units");
+CONSTANT(k_number, " 2.5e1xyz");
+
+static void test_mutation(void) {
+  CFMutableStringRef s = CFStringCreateMutable(NULL, 0);
+  CFStringAppend(s, S(k_padded));
+  CFStringTrimWhitespace(s);
+  check(string_is(s, "Age 3"), "trim white space");
+  CFStringAppendCString(s, " caf\x8e", kCFStringEncodingMacRoman);
+  CFStringAppendFormat(s, NULL, S(k_count_format), 12);
+  check(string_is(s, "Age 3 caf\xc3\xa9 12 units"), "append and format");
+  CFStringDelete(s, (CFRange){ 0, 6 });
+  CFStringUppercase(s, NULL);
+  check(string_is(s, "CAF\xc3\x89 12 UNITS"), "delete and uppercase");
+  UniChar chars[4] = { 1, 1, 1, 1 };
+  CFStringGetCharacters(s, (CFRange){ 10, 4 }, chars);
+  check(chars[0] == 'I' && chars[2] == 'S' && chars[3] == 0,
+        "characters past the end read as zero");
+  CFRelease(s);
+
+  check(CFStringCompare(S(k_hello), S(k_hello), 0) == 0, "compare equal");
+  check(CFStringCompare(S(k_l), S(k_upper_l), 0) == 1 &&
+            CFStringCompare(S(k_l), S(k_upper_l), 1) == 0,
+        "compare with and without case");
+  check(CFStringCompare(S(k_file2), S(k_file10), 0) == 1 &&
+            CFStringCompare(S(k_file2), S(k_file10), 64) == -1,
+        "compare numerically");
+  check(CFStringGetCStringPtr(S(k_hello), kCFStringEncodingMacRoman) &&
+            !strcmp(CFStringGetCStringPtr(S(k_hello),
+                                          kCFStringEncodingMacRoman),
+                    "Hello"),
+        "C string pointer of a constant");
+  check(CFStringGetDoubleValue(S(k_number)) == 25.0, "double value");
+
+  CFMutableArrayRef array = CFArrayCreateMutable(NULL, 0,
+                                                 &kCFTypeArrayCallBacks);
+  CFArrayAppendValue(array, S(k_l));
+  CFArrayAppendValue(array, S(k_b));
+  CFMutableArrayRef copy = CFArrayCreateMutableCopy(NULL, 0, array);
+  CFArraySetValueAtIndex(copy, 0, S(k_bb));
+  CFArraySetValueAtIndex(copy, 2, S(k_hello));
+  check(CFArrayGetCount(copy) == 3 &&
+            CFArrayGetFirstIndexOfValue(copy, (CFRange){ 0, 3 }, S(k_b)) ==
+                1 &&
+            CFArrayGetFirstIndexOfValue(array, (CFRange){ 0, 2 }, S(k_bb)) ==
+                -1,
+        "array copy, set and search");
+  CFRelease(copy);
+  CFRelease(array);
+
+  CFMutableDictionaryRef dict = CFDictionaryCreateMutable(
+      NULL, 0, &kCFCopyStringDictionaryKeyCallBacks,
+      &kCFTypeDictionaryValueCallBacks);
+  CFMutableStringRef key = CFStringCreateMutableCopy(NULL, 0, S(k_l));
+  CFDictionarySetValue(dict, key, S(k_hello));
+  CFStringAppend(key, S(k_b));
+  check(CFDictionaryGetValue(dict, S(k_l)) == S(k_hello),
+        "string keys are copied");
+  CFRelease(key);
+  CFRelease(dict);
+}
+
 static void test_plist(void) {
   static const char xml[] =
       "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
@@ -327,6 +419,7 @@ int main(int argc, char** argv) {
   }
   test_prefs();  // before the rest: HALO_MAC_HOME is read once
   test_strings();
+  test_mutation();
   test_plist();
   test_scalars();
   if (argc > 1) {

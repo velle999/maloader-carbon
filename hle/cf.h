@@ -170,6 +170,13 @@ CFStringRef CFStringCreateWithCharacters(CFAllocatorRef allocator,
                                          const UniChar* chars, CFIndex length);
 CFStringRef CFStringCreateWithCString(CFAllocatorRef allocator, const char* str,
                                       CFStringEncoding encoding);
+CFStringRef CFStringCreateWithBytes(CFAllocatorRef allocator,
+                                    const UInt8* bytes, CFIndex length,
+                                    CFStringEncoding encoding,
+                                    unsigned int external_representation);
+CFIndex CFStringGetLength(CFStringRef str);
+CFStringRef CFStringCreateWithSubstring(CFAllocatorRef allocator,
+                                        CFStringRef str, CFRange range);
 CFIndex CFStringGetBytes(CFStringRef str, CFRange range,
                          CFStringEncoding encoding, unsigned int loss_byte,
                          unsigned int external_representation, UInt8* buffer,

@@ -264,6 +264,43 @@ CGRect CGDisplayBounds(CGDirectDisplayID display) {
   return r;
 }
 
+size_t CGDisplayPixelsWide(CGDirectDisplayID display) {
+  hle_display_mode mode;
+  hle_display_current(&mode);
+  return mode.width;
+}
+
+size_t CGDisplayPixelsHigh(CGDirectDisplayID display) {
+  hle_display_mode mode;
+  hle_display_current(&mode);
+  return mode.height;
+}
+
+size_t CGDisplayBitsPerPixel(CGDirectDisplayID display) {
+  return 32;
+}
+
+// The physical size in millimeters, as a CGSize of two floats, which Darwin
+// returns in EAX:EDX. It is the size the desktop mode's pixels have at 96
+// dots an inch: games work out their dots per inch from it and size text
+// by that, and 96 is the resolution Windows games are made for.
+uint64_t CGDisplayScreenSize(CGDirectDisplayID display) {
+  pthread_mutex_lock(&lock);
+  load_modes();
+  float width = desktop.width * 25.4f / 96;
+  float height = desktop.height * 25.4f / 96;
+  pthread_mutex_unlock(&lock);
+  uint32_t w, h;
+  memcpy(&w, &width, 4);
+  memcpy(&h, &height, 4);
+  return (uint64_t)h << 32 | w;
+}
+
+// The display's IOKit service; there is none to query.
+uint32_t CGDisplayIOServicePort(CGDirectDisplayID display) {
+  return 0;
+}
+
 CFDictionaryRef CGDisplayCurrentMode(CGDirectDisplayID display) {
   pthread_mutex_lock(&lock);
   load_modes();

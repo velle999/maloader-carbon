@@ -182,6 +182,19 @@ int HSetVol(ConstStringPtr volume_name, SInt16 vref, int32_t dir_id) {
   return noErr;
 }
 
+int HGetVol(StringPtr volume_name, SInt16* vref, int32_t* dir_id) {
+  if (volume_name) {
+    hle_name_to_pascal(kVolumeName, volume_name, 28);
+  }
+  if (vref) {
+    *vref = kHleVolumeRefNum;
+  }
+  if (dir_id) {
+    *dir_id = (int32_t)hle_default_dir_id();
+  }
+  return noErr;
+}
+
 // ---------------------------------------------------------------------------
 // Paths
 

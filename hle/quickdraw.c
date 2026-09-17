@@ -2,8 +2,9 @@
 //
 // Simplified BSD License or GPLv3, like the rest of this tree.
 
-// QuickDraw without the screen: ports, GWorlds with real pixels, colors,
-// pens, rectangles, rectangular regions and pictures that draw nothing.
+// QuickDraw without the screen: ports, GWorlds with real pixels (1, 16 or
+// 32 bits deep), colors, pens, rectangles, rectangular regions and pictures
+// that draw nothing. Text is drawn by ATSUI (atsui.c).
 //
 // The game paints a window black before OpenGL takes it over and shows
 // nothing else through QuickDraw, so fills reach a GWorld's pixels and are
@@ -148,6 +149,12 @@ PixMapHandle GetGWorldPixMap(hle_port* port) {
   return GetPortPixMap(port);
 }
 
+// A port's pixel map, which CopyBits takes as a BitMap.
+const PixMap* GetPortBitMapForCopyBits(hle_port* port) {
+  PixMapHandle pixmap = GetPortPixMap(port);
+  return pixmap ? *pixmap : NULL;
+}
+
 hle_port* CreateNewPort(void) {
   hle_port* port = calloc(1, sizeof(*port));
   Rect empty = { 0, 0, 0, 0 };
@@ -168,6 +175,7 @@ void DisposePort(hle_port* port) {
 }
 
 enum {
+  k1MonochromePixelFormat = 0x00000001,
   k16BE555PixelFormat = 0x00000010,
   k32ARGBPixelFormat = 0x00000020,
   qdErrMemFull = -108,
@@ -201,17 +209,21 @@ static int32_t make_gworld(hle_port** out, int depth, UInt32 format,
   p->rowBytes = (SInt16)(0x8000 | (row_bytes & 0x7FFF));
   p->bounds = *bounds;
   p->pixelSize = depth;
-  p->cmpSize = depth == 16 ? 5 : 8;
+  p->cmpCount = depth == 1 ? 1 : 3;
+  p->cmpSize = depth == 1 ? 1 : depth == 16 ? 5 : 8;
   p->pixelFormat = format;
   *out = port;
   return noErr;
 }
 
+// Depths other than 1 and 16 get 32 bits.
 int32_t NewGWorld(hle_port** out, SInt16 depth, const Rect* bounds,
                   Handle color_table, GDHandle device, UInt32 flags) {
-  int bits = depth == 16 ? 16 : 32;
+  int bits = depth == 1 || depth == 16 ? depth : 32;
   return make_gworld(out, bits,
-                     bits == 16 ? k16BE555PixelFormat : k32ARGBPixelFormat,
+                     bits == 1    ? (UInt32)k1MonochromePixelFormat
+                     : bits == 16 ? (UInt32)k16BE555PixelFormat
+                                  : (UInt32)k32ARGBPixelFormat,
                      bounds, device, NULL, 0);
 }
 
@@ -264,6 +276,134 @@ Pattern* GetQDGlobalsWhite(Pattern* white) {
   return white;
 }
 
+Pattern* GetQDGlobalsGray(Pattern* gray) {
+  static const Pattern kGray = { 0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55 };
+  memcpy(*gray, kGray, sizeof(Pattern));
+  return gray;
+}
+
+Pattern* GetQDGlobalsLightGray(Pattern* gray) {
+  static const Pattern kLightGray = { 0x88, 0x22, 0x88, 0x22,
+                                      0x88, 0x22, 0x88, 0x22 };
+  memcpy(*gray, kLightGray, sizeof(Pattern));
+  return gray;
+}
+
+Pattern* GetQDGlobalsDarkGray(Pattern* gray) {
+  static const Pattern kDarkGray = { 0x77, 0xDD, 0x77, 0xDD,
+                                     0x77, 0xDD, 0x77, 0xDD };
+  memcpy(*gray, kDarkGray, sizeof(Pattern));
+  return gray;
+}
+
+GDHandle GetGWorldDevice(hle_port* port) {
+  port = port_of(port);
+  return port && port->device ? port->device : hle_main_device();
+}
+
+// ---------------------------------------------------------------------------
+// Pixel access
+
+// Pixels never move, so locking always succeeds.
+unsigned int LockPixels(PixMapHandle pixmap) {
+  return pixmap != NULL;
+}
+
+void UnlockPixels(PixMapHandle pixmap) {
+}
+
+Ptr GetPixBaseAddr(PixMapHandle pixmap) {
+  return pixmap && *pixmap ? (*pixmap)->baseAddr : NULL;
+}
+
+int32_t GetPixRowBytes(PixMapHandle pixmap) {
+  return pixmap && *pixmap ? (*pixmap)->rowBytes & 0x3FFF : 0;
+}
+
+static int luminance_is_dark(const RGBColor* color) {
+  return (color->red * 299u + color->green * 587u + color->blue * 114u) /
+             1000u < 0x8000;
+}
+
+// The pixel at (h, v) of the current port, where it has pixels; white
+// elsewhere.
+void GetCPixel(SInt16 h, SInt16 v, RGBColor* color) {
+  hle_port* port = hle_port_current();
+  *color = (RGBColor){ 0xFFFF, 0xFFFF, 0xFFFF };
+  if (!port->pixels || !port->pixmap) {
+    return;
+  }
+  PixMap* p = *port->pixmap;
+  if (h < p->bounds.left || h >= p->bounds.right || v < p->bounds.top ||
+      v >= p->bounds.bottom) {
+    return;
+  }
+  int row_bytes = p->rowBytes & 0x3FFF;
+  uint8_t* row = port->pixels + (v - p->bounds.top) * row_bytes;
+  int i = h - p->bounds.left;
+  if (p->pixelSize == 1) {
+    if (row[i / 8] & (0x80 >> (i % 8))) {
+      *color = (RGBColor){ 0, 0, 0 };
+    }
+  } else if (p->pixelSize == 16) {
+    uint16_t px = (uint16_t)(row[i * 2] << 8 | row[i * 2 + 1]);
+    color->red = ((px >> 10) & 0x1F) * 0xFFFF / 0x1F;
+    color->green = ((px >> 5) & 0x1F) * 0xFFFF / 0x1F;
+    color->blue = (px & 0x1F) * 0xFFFF / 0x1F;
+  } else {
+    color->red = row[i * 4 + 1] * 0x101;
+    color->green = row[i * 4 + 2] * 0x101;
+    color->blue = row[i * 4 + 3] * 0x101;
+  }
+}
+
+void hle_port_blend(hle_port* port, int h, int v, int coverage,
+                    const RGBColor* fore) {
+  if (!port || !port->pixels || !port->pixmap || coverage <= 0) {
+    return;
+  }
+  PixMap* p = *port->pixmap;
+  if (h < p->bounds.left || h >= p->bounds.right || v < p->bounds.top ||
+      v >= p->bounds.bottom) {
+    return;
+  }
+  if (coverage > 255) {
+    coverage = 255;
+  }
+  int row_bytes = p->rowBytes & 0x3FFF;
+  uint8_t* row = port->pixels + (v - p->bounds.top) * row_bytes;
+  int i = h - p->bounds.left;
+  if (p->pixelSize == 1) {
+    if (coverage >= 128) {
+      if (luminance_is_dark(fore)) {
+        row[i / 8] |= 0x80 >> (i % 8);
+      } else {
+        row[i / 8] &= ~(0x80 >> (i % 8));
+      }
+    }
+  } else if (p->pixelSize == 16) {
+    uint16_t px = (uint16_t)(row[i * 2] << 8 | row[i * 2 + 1]);
+    int channels[3] = { (px >> 10) & 0x1F, (px >> 5) & 0x1F, px & 0x1F };
+    int fores[3] = { fore->red >> 11, fore->green >> 11, fore->blue >> 11 };
+    uint16_t out = 0;
+    for (int c = 0; c < 3; c++) {
+      int mixed = (channels[c] * (255 - coverage) + fores[c] * coverage + 127) /
+                  255;
+      out = (uint16_t)(out << 5 | mixed);
+    }
+    row[i * 2] = out >> 8;
+    row[i * 2 + 1] = out;
+  } else {
+    uint8_t* px = row + i * 4;
+    int fores[3] = { fore->red >> 8, fore->green >> 8, fore->blue >> 8 };
+    px[0] = 0xFF;
+    for (int c = 0; c < 3; c++) {
+      px[1 + c] = (px[1 + c] * (255 - coverage) + fores[c] * coverage + 127) /
+                  255;
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Drawing into GWorld pixels
 
@@ -283,7 +423,13 @@ static void fill(const Rect* r, const RGBColor* color) {
     uint8_t* row = port->pixels + (y - p->bounds.top) * row_bytes;
     for (int x = left; x < right; x++) {
       int i = x - p->bounds.left;
-      if (p->pixelSize == 16) {
+      if (p->pixelSize == 1) {
+        if (luminance_is_dark(color)) {
+          row[i / 8] |= 0x80 >> (i % 8);
+        } else {
+          row[i / 8] &= ~(0x80 >> (i % 8));
+        }
+      } else if (p->pixelSize == 16) {
         // xRRRRRGGGGGBBBBB, big-endian
         uint16_t v = (color->red >> 11) << 10 | (color->green >> 11) << 5 |
                      (color->blue >> 11);
@@ -328,7 +474,7 @@ void FillRect(const Rect* r, const Pattern* pat) {
 int CopyBits(const PixMap* src, const PixMap* dst, const Rect* src_rect,
              const Rect* dst_rect, SInt16 mode, RgnHandle mask) {
   if (!src || !dst || !src->baseAddr || !dst->baseAddr || !src_rect ||
-      !dst_rect || src->pixelSize != dst->pixelSize) {
+      !dst_rect || src->pixelSize != dst->pixelSize || src->pixelSize < 8) {
     return noErr;
   }
   int bytes = src->pixelSize / 8;
@@ -433,11 +579,96 @@ void SetPenState(const PenState* pen) {
   }
 }
 
+void MoveTo(SInt16 h, SInt16 v) {
+  hle_port* port = hle_port_current();
+  port->pen.pnLoc = (Point){ v, h };
+}
+
+void GetPortForeColor(hle_port* port, RGBColor* color) {
+  port = port_of(port);
+  if (color) {
+    *color = port ? port->fore : (RGBColor){ 0, 0, 0 };
+  }
+}
+
+SInt16 GetPortTextFont(hle_port* port) {
+  port = port_of(port);
+  return port ? port->text_font : 0;
+}
+
+// A Style is a byte; the result fills EAX.
+unsigned int GetPortTextFace(hle_port* port) {
+  port = port_of(port);
+  return port ? port->text_face : 0;
+}
+
 void PenNormal(void) {
   hle_port* port = hle_port_current();
   port->pen.pnSize = (Point){ 1, 1 };
   port->pen.pnMode = 8;
   memset(port->pen.pnPat, 0xFF, sizeof(port->pen.pnPat));
+}
+
+// ---------------------------------------------------------------------------
+// Palettes: kept for the game, never applied to a device.
+
+#pragma pack(push, 2)
+typedef struct {
+  RGBColor ciRGB;
+  SInt16 ciUsage;
+  SInt16 ciTolerance;
+  SInt16 ciDataFields[3];
+} ColorInfo;
+
+typedef struct {
+  SInt16 pmEntries;
+  SInt16 pmDataFields[7];
+  ColorInfo pmInfo[1];
+} Palette;
+#pragma pack(pop)
+
+typedef Palette** PaletteHandle;
+
+PaletteHandle NewPalette(int32_t entries, Handle colors, int32_t usage,
+                         int32_t tolerance) {
+  entries = (SInt16)entries;
+  if (entries < 0) {
+    return NULL;
+  }
+  Size size = offsetof(Palette, pmInfo) +
+              sizeof(ColorInfo) * (entries > 0 ? entries : 1);
+  PaletteHandle palette = (PaletteHandle)hle_handle_new(NULL, size, 0);
+  if (!palette) {
+    return NULL;
+  }
+  memset(*palette, 0, size);
+  (*palette)->pmEntries = (SInt16)entries;
+  for (int i = 0; i < entries; i++) {
+    (*palette)->pmInfo[i].ciUsage = (SInt16)usage;
+    (*palette)->pmInfo[i].ciTolerance = (SInt16)tolerance;
+  }
+  return palette;
+}
+
+void DisposePalette(PaletteHandle palette) {
+  if (palette) {
+    DisposeHandle((Handle)palette);
+  }
+}
+
+void SetEntryColor(PaletteHandle palette, int32_t entry,
+                   const RGBColor* color) {
+  entry = (SInt16)entry;
+  if (palette && color && entry >= 0 && entry < (*palette)->pmEntries) {
+    (*palette)->pmInfo[entry].ciRGB = *color;
+  }
+}
+
+void GetEntryColor(PaletteHandle palette, int32_t entry, RGBColor* color) {
+  entry = (SInt16)entry;
+  if (palette && color && entry >= 0 && entry < (*palette)->pmEntries) {
+    *color = (*palette)->pmInfo[entry].ciRGB;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -533,6 +764,28 @@ Rect* GetRegionBounds(RgnHandle rgn, Rect* bounds) {
     }
   }
   return bounds;
+}
+
+// A Boolean result fills EAX.
+unsigned int EmptyRgn(RgnHandle rgn) {
+  if (!rgn) {
+    return 1;
+  }
+  const Rect* r = &(*rgn)->rgnBBox;
+  return r->bottom <= r->top || r->right <= r->left;
+}
+
+// Everything in a port is visible: nothing overlaps it.
+RgnHandle GetPortVisibleRegion(hle_port* port, RgnHandle rgn) {
+  port = port_of(port);
+  if (rgn) {
+    if (port) {
+      (*rgn)->rgnBBox = port->bounds;
+    } else {
+      memset(&(*rgn)->rgnBBox, 0, sizeof(Rect));
+    }
+  }
+  return rgn;
 }
 
 void RectRgn(RgnHandle rgn, const Rect* r) {

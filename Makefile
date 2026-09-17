@@ -13,7 +13,7 @@ endif
 CXXFLAGS=$(GCCFLAGS) -W --std=c++11
 # Darwin's off_t is 64 bits even on i386; libmac's Darwin structures and
 # the offsets games pass need Linux's to match.
-CFLAGS=$(GCCFLAGS) -fPIC -D_FILE_OFFSET_BITS=64 -Wno-multichar -Ithird_party/SDL2/include -D_REENTRANT
+CFLAGS=$(GCCFLAGS) -fPIC -D_FILE_OFFSET_BITS=64 -Wno-multichar -Ithird_party/SDL2/include -Ithird_party/freetype2/include -D_REENTRANT
 
 EXES=libmac.so extract macho2elf ld-mac
 
@@ -96,10 +96,13 @@ ld-mac: ld-mac.o mach-o.o fat.o log.o
 # hle/: CoreFoundation and the rest of what Mac OS X gives the game.
 HLE_OBJS=$(patsubst %.c,%.o,$(wildcard hle/*.c))
 libmac.so: libmac/mac.o libmac/strmode.c $(HLE_OBJS)
-	$(CC) -shared $^ $(CFLAGS) -o $@ $(GCC_EXTRA_FLAGS) $(LDFLAGS) -lpthread -lm -ldl -l:libSDL2-2.0.so.0 -l:libGL.so.1
+	$(CC) -shared $^ $(CFLAGS) -o $@ $(GCC_EXTRA_FLAGS) $(LDFLAGS) -lpthread -lm -ldl -l:libSDL2-2.0.so.0 -l:libGL.so.1 -l:libfreetype.so.6
 
 tests/cf_test: tests/cf_test.c libmac.so hle/cf.h
 	$(CC) $(CFLAGS) -o $@ tests/cf_test.c ./libmac.so -Wl,-rpath,$(CURDIR)
+
+tests/text_test: tests/text_test.c libmac.so hle/carbon.h hle/gui.h
+	$(CC) $(CFLAGS) -o $@ tests/text_test.c ./libmac.so -Wl,-rpath,$(CURDIR)
 
 tests/files_test: tests/files_test.c libmac.so hle/carbon.h
 	$(CC) $(CFLAGS) -o $@ tests/files_test.c ./libmac.so -Wl,-rpath,$(CURDIR)

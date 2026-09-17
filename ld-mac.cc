@@ -480,6 +480,10 @@ class MachOLoader {
     symbol_to_so_.insert(make_pair("MD5_Init", "libcrypto.so"));
     symbol_to_so_.insert(make_pair("MD5_Update", "libcrypto.so"));
 
+    // Every function of these, not only those listed below.
+    dylib_to_so_["/usr/lib/libz.1.dylib"].push_back("libz.so");
+    dylib_to_so_["/usr/lib/libxml2.2.dylib"].push_back("libxml2.so");
+
     symbol_to_so_.insert(make_pair("compress", "libz.so"));
     symbol_to_so_.insert(make_pair("compressBound", "libz.so"));
     symbol_to_so_.insert(make_pair("deflate", "libz.so"));
@@ -678,7 +682,7 @@ class MachOLoader {
   // A Linux library by the name the tables give, or by the runtime names a
   // system without development packages has (libz.so.1 for libz.so).
   static void* openLibrary(const string& so) {
-    static const char* const kSuffixes[] = { "", ".1", ".3", ".1.1" };
+    static const char* const kSuffixes[] = { "", ".1", ".2", ".3", ".1.1" };
     for (size_t i = 0; i < sizeof(kSuffixes) / sizeof(kSuffixes[0]); i++) {
       if (void* handle = dlopen((so + kSuffixes[i]).c_str(),
                                 RTLD_LAZY | RTLD_GLOBAL)) {

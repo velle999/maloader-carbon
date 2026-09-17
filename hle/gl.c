@@ -142,7 +142,7 @@ static int dispatch_resolved;
 // lists far more than a 2006 Mac did. It is given the extensions whose names
 // its executable contains, the only ones it can ask about, plus
 // EXT_texture_rectangle where the driver has ARB_texture_rectangle, which
-// uses the same enumerants.
+// uses the same enumerants, and the Apple extensions gl_var.c emulates.
 
 enum {
   GL_EXTENSIONS = 0x1F03,
@@ -220,11 +220,18 @@ static const char* game_extensions(const char* all) {
       cf_buf_appends(&out, kExtRectangle);
       cf_buf_append(&out, " ", 1);
     }
-    // Apple's vertex array range and fence, over buffer objects (gl_var.c).
+    // Apple's vertex array range and fence, over buffer objects (gl_var.c),
+    // and its vertex array objects to a game that looks for them.
     static const char kArbBuffers[] = "GL_ARB_vertex_buffer_object";
+    static const char kAppleObjects[] = "GL_APPLE_vertex_array_object";
     if (hle_gl_var_enabled() &&
         has_word(all, all_size, kArbBuffers, sizeof(kArbBuffers) - 1)) {
       cf_buf_appends(&out, "GL_APPLE_vertex_array_range GL_APPLE_fence ");
+      if (image && has_word(image, image_size, kAppleObjects,
+                            sizeof(kAppleObjects) - 1)) {
+        cf_buf_appends(&out, kAppleObjects);
+        cf_buf_append(&out, " ", 1);
+      }
     }
     free(image);
     extensions = out.data;
